@@ -1,1 +1,104 @@
 
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一時保育予約システム</title>
+
+    <style>
+        body {
+            font-family: sans-serif;
+            background-color: #f9f6eb;
+            margin: 0;
+            padding: 0;
+        }
+
+        header {
+            background-color: #facd79;
+            color: white;
+            text-align: center;
+            padding: 30px 15px;
+        }
+
+        header h1 {
+            margin: 0;
+        }
+
+        main {
+            max-width: 550px;
+            margin: 50px auto;
+            padding: 20px;
+            text-align: center;
+        }
+
+        
+.menu {
+    display: block;
+    background-color: white;
+    color: #333;
+    text-decoration: none;
+    padding: 25px;
+    margin: 20px 0;
+    border-radius: 12px;
+    border: 2px solid #d6aa78;
+    font-size: 20px;
+    font-weight: bold;
+    cursor: pointer;
+
+    /* 動きをなめらかにする */
+    transition: transform 0.2s ease,
+                box-shadow 0.2s ease,
+                background-color 0.2s ease;
+}
+
+.menu:hover {
+    background-color: #ffcc7a;
+
+    /* 少し大きくして浮き上がらせる */
+    transform: translateY(-5px) scale(1.03);
+
+    /* 影をつける */
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.15);
+}
+
+.menu:active {
+    /* クリックした瞬間に少し縮む */
+    transform: scale(0.97);
+}
+
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>一時保育予約システム</h1>
+        <p>安心・便利な一時保育予約サービス</p>
+    </header>
+
+    <main>
+        <h2>メニュー</h2>
+        <p>ご利用するサービスを選択してください</p>
+
+        <a href="login.html" class="menu">
+            新規登録・ログイン
+        </a>
+
+        <a href="reservation.html" class="menu">
+            予約する
+        </a>
+
+        <a href="points.html" class="menu">
+            優先ポイント確認
+        </a>
+    </main>
+
+    <footer>
+        <p>一時保育予約システム</p>
+    </footer>
+
+</body>
+</html>
+
+
