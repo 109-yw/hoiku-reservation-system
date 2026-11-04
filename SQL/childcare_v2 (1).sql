@@ -21,7 +21,6 @@ INSERT INTO settings (key, value, description) VALUES
   ('late_pickup_point_per_hour','-1',   '延滞1時間ごとのポイント増減'),
   ('late_fee_per_hour_yen',     '500',  '延滞料（1時間あたり・仮値）'),
   ('offer_response_minutes',    '30',   '繰り上げ通知への回答期限（分・仮値）'),
-  ('min_hours_per_booking',     '2',    '最小予約時間'),
   ('open_hour',                 '9',    '開所時刻'),
   ('close_hour',                '17',   '閉所時刻'),
   ('staff_count',               '5',    '保育士数（固定。欠勤・増員は考慮しない）'),
@@ -115,7 +114,8 @@ CREATE TABLE reservations (
     qr_token        TEXT UNIQUE,            -- 登降園QR
     created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    CHECK (end_hour - start_hour >= 2),     -- 最小2時間・1時間単位
+    CHECK ((start_hour = 9 AND end_hour IN (13, 17))
+        OR (start_hour = 13 AND end_hour = 17)), -- 午前・午後・1日コース
     FOREIGN KEY (child_id)      REFERENCES children(child_id),
     FOREIGN KEY (care_date)     REFERENCES operating_days(care_date),
     FOREIGN KEY (age_class_id)  REFERENCES age_classes(age_class_id)
@@ -318,12 +318,12 @@ VALUES ('山田 花子', 'ヤマダ ハナコ', '090-0000-0000', 'hanako@example
 INSERT INTO children (guardian_id, name, name_kana, birth_date, allergy_note, karte_status)
 VALUES (1, '山田 太郎', 'ヤマダ タロウ', '2026-02-01', '卵アレルギー', 'approved');
 
--- 9:00-12:00 の予約（0歳児：2時間超=3時間 × 1200円）
+-- 午前コース 9:00-13:00（0歳児：4時間 × 1200円）
 INSERT INTO reservations (child_id, care_date, start_hour, end_hour, age_class_id,
                           staff_cost, fee_yen, status, qr_token)
-VALUES (1, '2026-11-10', 9, 12, 1, 0.33, 3600, 'confirmed', 'qr-sample-0001');
+VALUES (1, '2026-11-10', 9, 13, 1, 0.33, 4800, 'confirmed', 'qr-sample-0001');
 INSERT INTO reservation_hours (reservation_id, care_date, hour)
-VALUES (1,'2026-11-10',9),(1,'2026-11-10',10),(1,'2026-11-10',11);
+VALUES (1,'2026-11-10',9),(1,'2026-11-10',10),(1,'2026-11-10',11),(1,'2026-11-10',12);
 
 -- ===== クエリ例 =====
 -- 空き状況:        SELECT * FROM v_hourly_load WHERE care_date = '2026-11-10';
