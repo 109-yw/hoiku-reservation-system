@@ -162,32 +162,40 @@ input, select {
         <span class="full">× 満員</span>
     </div>
 
-    <div class="form-area" id="formArea">
-        <h2 id="selectedDate"></h2>
+    
+<div class="form-area" id="formArea">
 
-        <form id="reservationForm">
-            <label for="childName">お子様の氏名</label>
-            <input type="text" id="childName" required>
+    <h2 id="selectedDate"></h2>
+    <p>利用人数と利用時間を選択してください。</p>
 
-            <label for="time">利用時間</label>
-            <select id="time" required>
-                <option value="">選択してください</option>
-                <option value="9:00～12:00">
-                    9:00～12:00
-                </option>
-                <option value="13:00～17:00">
-                    13:00～17:00
-                </option>
-                <option value="9:00～17:00">
-                    9:00～17:00
-                </option>
-            </select>
+    <form id="reservationForm">
 
-            <button type="submit" class="reserve">
-                予約内容を確認
-            </button>
-        </form>
-    </div>
+        <!-- 子どもの人数 -->
+        <label for="childCount">お子様の人数</label>
+        <select id="childCount" required>
+            <option value="">選択してください</option>
+            <option value="1">1人</option>
+            <option value="2">2人</option>
+            <option value="3">3人</option>
+            <option value="4">4人</option>
+        </select>
+
+        <!-- 利用時間 -->
+        <label for="time">利用時間</label>
+        <select id="time" required>
+            <option value="">選択してください</option>
+            <option value="9:00～12:00">9:00～12:00</option>
+            <option value="13:00～17:00">13:00～17:00</option>
+            <option value="9:00～17:00">9:00～17:00</option>
+        </select>
+
+        <button type="submit" class="reserve">
+            予約内容を確認
+        </button>
+
+    </form>
+</div>
+
 
     <a href="hoiku.html" class="back">
         トップページに戻る
