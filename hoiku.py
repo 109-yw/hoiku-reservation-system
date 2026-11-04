@@ -12,6 +12,11 @@ from flask import Flask, Response, g, jsonify, request
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA_PATH = ROOT / "SQL" / "childcare_v2 (1).sql"
+COURSES = {
+    "morning": (9, 13),
+    "afternoon": (13, 17),
+    "full_day": (9, 17),
+}
 
 
 class ApiError(Exception):
@@ -100,11 +105,16 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             return error_response("JSON形式のリクエストが必要です。", 400)
 
         child_id = _integer(payload.get("child_id"))
-        start_hour = _integer(payload.get("start_hour"))
-        end_hour = _integer(payload.get("end_hour"))
+        course = payload.get("course")
         care_date = payload.get("care_date")
-        if child_id is None or start_hour is None or end_hour is None:
-            return error_response("child_id、start_hour、end_hour は整数で指定してください。", 400)
+        if child_id is None:
+            return error_response("child_id は整数で指定してください。", 400)
+        if not isinstance(course, str) or course not in COURSES:
+            return error_response(
+                "course は morning、afternoon、full_day のいずれかを指定してください。",
+                400,
+            )
+        start_hour, end_hour = COURSES[course]
         if not isinstance(care_date, str):
             return error_response("care_date は YYYY-MM-DD 形式で指定してください。", 400)
         try:
@@ -113,11 +123,6 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             return error_response("care_date は YYYY-MM-DD 形式で指定してください。", 400)
         if booking_date.isoformat() != care_date:
             return error_response("care_date は YYYY-MM-DD 形式で指定してください。", 400)
-        if not (9 <= start_hour <= 15 and 11 <= end_hour <= 17):
-            return error_response("保育時間は9時から17時の範囲で指定してください。", 400)
-        if end_hour - start_hour < 2:
-            return error_response("予約時間は2時間以上で指定してください。", 400)
-
         connection = get_database()
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -136,19 +141,27 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             if child["karte_status"] != "approved":
                 raise ApiError("承認済みの児童カルテが必要です。", 409)
 
-            duplicate = connection.execute(
+            connection.execute(
                 """
-                SELECT 1 FROM reservations
+                UPDATE reservations
+                SET status = 'expired', hold_expires_at = NULL,
+                    updated_at = datetime('now', 'localtime')
                 WHERE child_id = ? AND care_date = ?
-                  AND (status = 'confirmed'
-                       OR (status = 'held'
-                           AND hold_expires_at > datetime('now', 'localtime')))
-                LIMIT 1
+                  AND status = 'held'
+                  AND hold_expires_at <= datetime('now', 'localtime')
                 """,
                 (child_id, care_date),
-            ).fetchone()
-            if duplicate:
-                raise ApiError("この児童には同日の有効な予約があります。", 409)
+            )
+            connection.execute(
+                """
+                DELETE FROM reservation_hours
+                WHERE reservation_id IN (
+                    SELECT reservation_id FROM reservations
+                    WHERE child_id = ? AND care_date = ? AND status = 'expired'
+                )
+                """,
+                (child_id, care_date),
+            )
 
             birth_date = date.fromisoformat(child["birth_date"])
             age_months = (
@@ -168,6 +181,83 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             if age_class is None:
                 raise ApiError("予約日の年齢に対応する年齢区分がありません。", 400)
 
+            existing = connection.execute(
+                """
+                SELECT reservation_id, start_hour, end_hour, status, hold_expires_at
+                FROM reservations
+                WHERE child_id = ? AND care_date = ?
+                  AND (status = 'confirmed'
+                       OR (status = 'held'
+                           AND hold_expires_at > datetime('now', 'localtime')))
+                ORDER BY reservation_id
+                LIMIT 1
+                """,
+                (child_id, care_date),
+            ).fetchone()
+            hours = end_hour - start_hour
+            fee_yen = age_class["hourly_fee_yen"] * hours
+            if existing is not None:
+                if existing["status"] == "confirmed":
+                    raise ApiError(
+                        "同日の予約はすでに確定しています。確定後のコース変更はできません。",
+                        409,
+                    )
+
+                existing_course = next(
+                    (
+                        name
+                        for name, interval in COURSES.items()
+                        if interval
+                        == (existing["start_hour"], existing["end_hour"])
+                    ),
+                    None,
+                )
+                if existing_course is None or existing_course == "full_day":
+                    raise ApiError("同日の有効な仮押さえがあります。", 409)
+                if course == existing_course:
+                    raise ApiError("同じコースがすでに仮押さえされています。", 409)
+
+                reservation_id = existing["reservation_id"]
+                connection.execute(
+                    "DELETE FROM reservation_hours WHERE reservation_id = ?",
+                    (reservation_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE reservations
+                    SET start_hour = 9, end_hour = 17, age_class_id = ?,
+                        staff_cost = ?, fee_yen = ?,
+                        updated_at = datetime('now', 'localtime')
+                    WHERE reservation_id = ?
+                    """,
+                    (
+                        age_class["age_class_id"],
+                        age_class["staff_cost"],
+                        age_class["hourly_fee_yen"] * 8,
+                        reservation_id,
+                    ),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO reservation_hours (reservation_id, care_date, hour)
+                    VALUES (?, ?, ?)
+                    """,
+                    ((reservation_id, care_date, hour) for hour in range(9, 17)),
+                )
+                connection.commit()
+                return (
+                    jsonify(
+                        reservation_id=reservation_id,
+                        status="held",
+                        course="full_day",
+                        start_hour=9,
+                        end_hour=17,
+                        hold_expires_at=existing["hold_expires_at"],
+                        fee_yen=age_class["hourly_fee_yen"] * 8,
+                    ),
+                    200,
+                )
+
             timeout_row = connection.execute(
                 "SELECT value FROM settings WHERE key = 'hold_timeout_sec'"
             ).fetchone()
@@ -176,7 +266,6 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             hold_expires_at = (
                 datetime.now() + timedelta(seconds=int(timeout_row["value"]))
             ).strftime("%Y-%m-%d %H:%M:%S")
-            hours = end_hour - start_hour
             cursor = connection.execute(
                 """
                 INSERT INTO reservations (
@@ -191,7 +280,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     end_hour,
                     age_class["age_class_id"],
                     age_class["staff_cost"],
-                    age_class["hourly_fee_yen"] * hours,
+                    fee_yen,
                     hold_expires_at,
                 ),
             )
@@ -221,8 +310,11 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             jsonify(
                 reservation_id=reservation_id,
                 status="held",
+                course=course,
+                start_hour=start_hour,
+                end_hour=end_hour,
                 hold_expires_at=hold_expires_at,
-                fee_yen=age_class["hourly_fee_yen"] * hours,
+                fee_yen=fee_yen,
             ),
             201,
         )
