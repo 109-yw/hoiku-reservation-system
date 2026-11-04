@@ -1,0 +1,219 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>新規登録・ログイン</title>
+
+<style>
+body {
+    font-family: sans-serif;
+    background: #f0f6fa;
+    margin: 0;
+}
+
+header {
+    background: #78b5d6;
+    color: white;
+    text-align: center;
+    padding: 25px;
+}
+
+.container {
+    max-width: 450px;
+    margin: 50px auto;
+    background: white;
+    padding: 30px;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px #0001;
+}
+
+.tabs {
+    display: flex;
+    margin-bottom: 25px;
+}
+
+.tab {
+    flex: 1;
+    padding: 15px;
+    border: none;
+    background: #e9f1f6;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+.tab.active {
+    background: #78b5d6;
+    color: white;
+}
+
+h2 {
+    text-align: center;
+}
+
+label {
+    display: block;
+    margin-top: 15px;
+}
+
+input {
+    width: 100%;
+    padding: 12px;
+    margin-top: 5px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    box-sizing: border-box;
+}
+
+.submit {
+    width: 100%;
+    padding: 15px;
+    margin-top: 25px;
+    background: #78b5d6;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.submit:hover {
+    background: #559ac2;
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 5px 12px #0002;
+}
+
+.form {
+    display: none;
+}
+
+.form.active {
+    display: block;
+}
+
+.back {
+    display: block;
+    text-align: center;
+    margin-top: 25px;
+    color: #559ac2;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <h1>一時保育予約システム</h1>
+    <p>新規登録・ログイン</p>
+</header>
+
+<div class="container">
+
+    <div class="tabs">
+        <button class="tab active"
+                onclick="showForm('login')">
+            ログイン
+        </button>
+
+        <button class="tab"
+                onclick="showForm('register')">
+            新規登録
+        </button>
+    </div>
+
+    <!-- ログインフォーム -->
+    <div id="login" class="form active">
+        <h2>ログイン</h2>
+
+        <form onsubmit="login(event)">
+            <label>メールアドレス</label>
+            <input type="email" required>
+
+            <label>パスワード</label>
+            <input type="password" required>
+
+            <button type="submit" class="submit">
+                ログイン
+            </button>
+        </form>
+    </div>
+
+    <!-- 新規登録フォーム -->
+    <div id="register" class="form">
+        <h2>新規登録</h2>
+
+        <form onsubmit="register(event)">
+            <label>保護者氏名</label>
+            <input type="text" required>
+
+            <label>メールアドレス</label>
+            <input type="email" required>
+
+            <label>パスワード</label>
+            <input type="password" id="password" required>
+
+            <label>パスワード（確認用）</label>
+            <input type="password" id="confirmPassword" required>
+
+            <button type="submit" class="submit">
+                新規登録する
+            </button>
+        </form>
+    </div>
+
+    <a href="hoiku.html" class="back">
+        トップページに戻る
+    </a>
+
+</div>
+
+<script>
+// フォームの切り替え
+function showForm(type) {
+    document.querySelectorAll(".form").forEach(form => {
+        form.classList.remove("active");
+    });
+
+    document.querySelectorAll(".tab").forEach(tab => {
+        tab.classList.remove("active");
+    });
+
+    document.getElementById(type).classList.add("active");
+
+    if (type === "login") {
+        document.querySelectorAll(".tab")[0].classList.add("active");
+    } else {
+        document.querySelectorAll(".tab")[1].classList.add("active");
+    }
+}
+
+// ログイン処理（仮）
+function login(event) {
+    event.preventDefault();
+
+    alert("ログイン機能は現在準備中です。");
+}
+
+// 新規登録処理（仮）
+function register(event) {
+    event.preventDefault();
+
+    const password =
+        document.getElementById("password").value;
+
+    const confirm =
+        document.getElementById("confirmPassword").value;
+
+    if (password !== confirm) {
+        alert("パスワードが一致しません。");
+        return;
+    }
+
+    alert("新規登録機能は現在準備中です。");
+}
+</script>
+
+</body>
+</html>
