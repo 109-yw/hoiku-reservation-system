@@ -1,0 +1,324 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>一時保育予約</title>
+
+<style>
+body {
+    font-family: sans-serif;
+    background: #f0f6fa;
+    margin: 0;
+}
+
+header {
+    background: #78b5d6;
+    color: white;
+    text-align: center;
+    padding: 25px;
+}
+
+.container {
+    max-width: 650px;
+    margin: 30px auto;
+    padding: 25px;
+    background: white;
+    border-radius: 12px;
+}
+
+.month {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+button {
+    cursor: pointer;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 15px;
+    background: #78b5d6;
+    color: white;
+}
+
+button:hover {
+    background: #559ac2;
+}
+
+.calendar {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 5px;
+}
+
+.weekday {
+    text-align: center;
+    font-weight: bold;
+    padding: 10px 0;
+}
+
+.day {
+    min-height: 65px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background: white;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    transition: 0.2s;
+}
+
+.day:hover:not(:disabled) {
+    background: #dceefa;
+    transform: translateY(-3px) scale(1.04);
+    box-shadow: 0 4px 10px #0002;
+}
+
+.day.selected {
+    background: #c5e5f7;
+    border: 2px solid #559ac2;
+}
+
+.day:disabled {
+    background: #f1f1f1;
+    color: #aaa;
+    cursor: not-allowed;
+}
+
+.status {
+    font-size: 13px;
+}
+
+.open { color: green; }
+.few { color: orange; }
+.full { color: red; }
+
+.legend {
+    text-align: center;
+    margin: 20px 0;
+}
+
+.form-area {
+    display: none;
+    border-top: 1px solid #ddd;
+    padding-top: 20px;
+}
+
+label {
+    display: block;
+    margin-top: 15px;
+}
+
+input, select {
+    width: 100%;
+    padding: 10px;
+    margin-top: 5px;
+    box-sizing: border-box;
+}
+
+.reserve {
+    width: 100%;
+    margin-top: 25px;
+    padding: 15px;
+}
+
+.back {
+    display: block;
+    text-align: center;
+    margin-top: 25px;
+    color: #559ac2;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <h1>一時保育予約システム</h1>
+    <p>予約画面</p>
+</header>
+
+<div class="container">
+
+    <h2>利用希望日を選択</h2>
+
+    <div class="month">
+        <button onclick="changeMonth(-1)">◀ 前月</button>
+        <h2 id="monthTitle"></h2>
+        <button onclick="changeMonth(1)">翌月 ▶</button>
+    </div>
+
+    <div class="calendar" id="calendar"></div>
+
+    <div class="legend">
+        <span class="open">○ 空きあり</span>　
+        <span class="few">△ 残りわずか</span>　
+        <span class="full">× 満員</span>
+    </div>
+
+    
+<div class="form-area" id="formArea">
+
+    <h2 id="selectedDate"></h2>
+    <p>利用人数と利用時間を選択してください。</p>
+
+    <form id="reservationForm">
+
+        <!-- 子どもの人数 -->
+        <label for="childCount">お子様の人数</label>
+        <select id="childCount" required>
+            <option value="">選択してください</option>
+            <option value="1">1人</option>
+            <option value="2">2人</option>
+            <option value="3">3人</option>
+            <option value="4">4人</option>
+        </select>
+
+        <!-- 利用時間 -->
+        <label for="time">利用時間</label>
+        <select id="time" required>
+            <option value="">選択してください</option>
+            <option value="9:00～13:00">9:00～13:00（午前）</option>
+            <option value="13:00～17:00">13:00～17:00（午後）</option>
+            <option value="9:00～17:00">9:00～17:00（一日）</option>
+        </select>
+
+        <button type="submit" class="reserve">
+            予約内容を確認
+        </button>
+
+    </form>
+</div>
+
+
+    <a href="hoiku.html" class="back">
+        トップページに戻る
+    </a>
+
+</div>
+
+<script>
+const today = new Date();
+today.setHours(0, 0, 0, 0);
+
+let currentYear = today.getFullYear();
+let currentMonth = today.getMonth();
+let selectedDate = null;
+
+// 仮の空き状況
+function getStatus(day) {
+    if (day % 9 === 0) return "full";
+    if (day % 5 === 0) return "few";
+    return "open";
+}
+
+// カレンダーを表示
+function renderCalendar() {
+    const calendar = document.getElementById("calendar");
+    calendar.innerHTML = "";
+
+    document.getElementById("monthTitle").textContent =
+        `${currentYear}年${currentMonth + 1}月`;
+
+    const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
+
+    weekdays.forEach(w => {
+        const div = document.createElement("div");
+        div.className = "weekday";
+        div.textContent = w;
+        calendar.appendChild(div);
+    });
+
+    const firstDay = new Date(currentYear, currentMonth, 1).getDay();
+    const lastDay = new Date(currentYear, currentMonth + 1, 0).getDate();
+
+    for (let i = 0; i < firstDay; i++) {
+        calendar.appendChild(document.createElement("div"));
+    }
+
+    for (let day = 1; day <= lastDay; day++) {
+        const date = new Date(currentYear, currentMonth, day);
+        const status = getStatus(day);
+
+        const btn = document.createElement("button");
+        btn.className = "day";
+        btn.type = "button";
+
+        const number = document.createElement("span");
+        number.textContent = day;
+
+        const mark = document.createElement("span");
+        mark.className = "status " + status;
+        mark.textContent =
+            status === "full" ? "×" :
+            status === "few" ? "△" : "○";
+
+        btn.appendChild(number);
+        btn.appendChild(mark);
+
+        if (date < today || status === "full") {
+            btn.disabled = true;
+        } else {
+            btn.onclick = () => selectDate(day, btn);
+        }
+
+        calendar.appendChild(btn);
+    }
+}
+
+// 月を切り替える
+function changeMonth(value) {
+    const date = new Date(currentYear, currentMonth + value, 1);
+    currentYear = date.getFullYear();
+    currentMonth = date.getMonth();
+
+    selectedDate = null;
+    document.getElementById("formArea").style.display = "none";
+
+    renderCalendar();
+}
+
+// 日付を選択
+function selectDate(day, button) {
+    document.querySelectorAll(".day").forEach(btn => {
+        btn.classList.remove("selected");
+    });
+
+    button.classList.add("selected");
+
+    selectedDate =
+        `${currentYear}年${currentMonth + 1}月${day}日`;
+
+    document.getElementById("selectedDate").textContent =
+        selectedDate + " の予約";
+
+    document.getElementById("formArea").style.display = "block";
+}
+
+// 予約内容を確認
+document.getElementById("reservationForm").onsubmit = function(e) {
+    e.preventDefault();
+
+    const name = document.getElementById("childName").value;
+    const time = document.getElementById("time").value;
+
+    alert(
+        "【予約内容】\n" +
+        "利用日：" + selectedDate + "\n" +
+        "お子様：" + name + "\n" +
+        "利用時間：" + time + "\n\n" +
+        "※現在は試作品のため予約は保存されません。"
+    );
+};
+
+renderCalendar();
+</script>
+
+</body>
+</html>

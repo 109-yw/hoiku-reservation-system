@@ -1,0 +1,160 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>優先ポイント確認</title>
+
+<style>
+body {
+    font-family: sans-serif;
+    background: #f0f6fa;
+    margin: 0;
+}
+
+header {
+    background: #78b5d6;
+    color: white;
+    text-align: center;
+    padding: 25px;
+}
+
+.container {
+    max-width: 600px;
+    margin: 30px auto;
+    padding: 20px;
+}
+
+.card {
+    background: white;
+    padding: 25px;
+    margin-bottom: 20px;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px #0001;
+}
+
+.point-card {
+    text-align: center;
+}
+
+.point-number {
+    font-size: 60px;
+    font-weight: bold;
+    color: #559ac2;
+    margin: 15px 0;
+}
+
+.point-number span {
+    font-size: 20px;
+}
+
+.description {
+    color: #777;
+    font-size: 14px;
+}
+
+.history {
+    display: flex;
+    justify-content: space-between;
+    padding: 15px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.plus {
+    color: green;
+    font-weight: bold;
+}
+
+.back {
+    display: block;
+    text-align: center;
+    padding: 15px;
+    background: white;
+    color: #559ac2;
+    border: 2px solid #78b5d6;
+    border-radius: 10px;
+    text-decoration: none;
+    font-weight: bold;
+    transition: 0.2s;
+}
+
+.back:hover {
+    background: #dceefa;
+    transform: translateY(-4px) scale(1.02);
+    box-shadow: 0 5px 12px #0002;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <h1>一時保育予約システム</h1>
+    <p>優先ポイント確認</p>
+</header>
+
+<div class="container">
+
+    <!-- 現在のポイント -->
+    <div class="card point-card">
+        <h2>現在の優先ポイント</h2>
+
+        <div class="point-number">
+            <span id="pointValue">3</span>
+            <span>ポイント</span>
+        </div>
+
+        <p class="description">
+            キャンセル待ちの優先順位に利用できます
+        </p>
+    </div>
+
+    <!-- ポイント履歴 -->
+    <div class="card">
+        <h2>ポイント履歴</h2>
+
+        <div class="history">
+            <span>10/25 キャンセル待ち不成立</span>
+            <span class="plus">+1</span>
+        </div>
+
+        <div class="history">
+            <span>10/18 キャンセル待ち不成立</span>
+            <span class="plus">+1</span>
+        </div>
+
+        <div class="history">
+            <span>10/10 キャンセル待ち不成立</span>
+            <span class="plus">+1</span>
+        </div>
+    </div>
+
+    <!-- ポイントの説明 -->
+    <div class="card">
+        <h2>優先ポイントについて</h2>
+
+        <p>
+            キャンセル待ちで予約が成立しなかった場合、
+            優先ポイントが加算されます。
+        </p>
+
+        <p>
+            ポイントを使用して予約が成立すると、
+            保有ポイントは0にリセットされます。
+        </p>
+
+        <p>
+            ポイントが多い利用者ほど、
+            キャンセル待ちで優先されます。
+        </p>
+    </div>
+
+    <a href="hoiku.html" class="back">
+        トップページに戻る
+    </a>
+
+</div>
+
+</body>
+</html>
