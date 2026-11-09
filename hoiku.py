@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import csv
+import io
 import os
 import secrets
 import sqlite3
+import tempfile
+import zipfile
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -26,7 +29,26 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 
 ROOT = Path(__file__).resolve().parent
-SCHEMA_PATH = ROOT / "SQL" / "childcare_v2 (1).sql"
+SCHEMA_PATH = ROOT / "SQL" / "childcare_v2.sql"
+CSV_ARCHIVE_PATH = ROOT / "SQL" / "csv_export_all.zip"
+CSV_DATASET_VERSION = 1
+CSV_TABLE_IMPORT_ORDER = (
+    "settings",
+    "guardians",
+    "age_classes",
+    "operating_days",
+    "children",
+    "reservations",
+    "waitlist_offers",
+    "notifications",
+    "reservation_hours",
+    "cancellations",
+    "attendance",
+    "payments",
+    "point_ledger",
+    "admin_users",
+    "cancel_policies",
+)
 COURSES = {
     "morning": (9, 13),
     "afternoon": (13, 17),
@@ -45,257 +67,130 @@ def initialize_database(database_path: str | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not SCHEMA_PATH.is_file():
         raise FileNotFoundError(f"SQLite schema not found: {SCHEMA_PATH}")
+    if not CSV_ARCHIVE_PATH.is_file():
+        raise FileNotFoundError(f"CSV archive not found: {CSV_ARCHIVE_PATH}")
 
-    with closing(sqlite3.connect(path)) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        existing_tables = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        if any(name == "settings" for (name,) in existing_tables):
-            pass
-        elif existing_tables:
-            raise RuntimeError(f"Database already contains unrelated tables: {path}")
-        else:
+    if path.is_file():
+        with closing(sqlite3.connect(path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version == CSV_DATASET_VERSION:
+                return
+            existing_tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            required_tables = {
+                "guardians",
+                "children",
+                "operating_days",
+                "reservations",
+                "settings",
+            }
+            if existing_tables and not required_tables.issubset(existing_tables):
+                raise RuntimeError(
+                    f"Database contains unrelated tables and will not be replaced: {path}"
+                )
+
+    with tempfile.NamedTemporaryFile(
+        prefix=f"{path.stem}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    ) as temporary:
+        staged_path = Path(temporary.name)
+
+    try:
+        with closing(sqlite3.connect(staged_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
             connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+            connection.execute("PRAGMA foreign_keys = OFF")
 
-
-def seed_test_accounts(database_path: str | Path) -> None:
-    accounts = (
-        ("佐藤 敏夫", "090-1111-1111", "hogo1@example.com", "satou",
-         "佐藤 太郎", "サトウ タロウ", "2020-04-15"),
-        ("鈴木 一郎", "090-2222-2222", "hogo2@example.com", "suzuki",
-         "鈴木 愛", "スズキ アイ", "2021-06-20"),
-    )
-    with closing(sqlite3.connect(database_path)) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        for (
-            guardian_name,
-            phone,
-            email,
-            password,
-            child_name,
-            child_name_kana,
-            birth_date,
-        ) in accounts:
-            connection.execute(
-                """
-                INSERT INTO guardians (name, phone, email, password_hash)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(email) DO UPDATE SET
-                    name = excluded.name,
-                    phone = excluded.phone,
-                    password_hash = excluded.password_hash
-                """,
-                (guardian_name, phone, email, generate_password_hash(password)),
-            )
-            guardian_id = connection.execute(
-                "SELECT guardian_id FROM guardians WHERE email = ?", (email,)
-            ).fetchone()[0]
-            child = connection.execute(
-                """
-                SELECT child_id FROM children
-                WHERE guardian_id = ? AND name = ?
-                """,
-                (guardian_id, child_name),
-            ).fetchone()
-            if child is None:
-                connection.execute(
-                    """
-                    INSERT INTO children (
-                        guardian_id, name, name_kana, birth_date, karte_status
-                    ) VALUES (?, ?, ?, ?, 'approved')
-                    """,
-                    (guardian_id, child_name, child_name_kana, birth_date),
+            table_names = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
                 )
-            else:
-                connection.execute(
-                    """
-                    UPDATE children
-                    SET name_kana = ?, birth_date = ?, karte_status = 'approved'
-                    WHERE child_id = ?
-                    """,
-                    (child_name_kana, birth_date, child[0]),
-                )
-        connection.commit()
+            ]
+            for table in table_names:
+                connection.execute(f'DELETE FROM "{table}"')
+            connection.execute("DELETE FROM sqlite_sequence")
+            connection.execute("PRAGMA foreign_keys = ON")
 
-
-def import_csv_data(database_path: str | Path) -> None:
-    csv_directory = ROOT / "SQL"
-    csv_files = {
-        "guardians": csv_directory / "guardians.csv",
-        "children": csv_directory / "children.csv",
-        "operating_days": csv_directory / "operating_days.csv",
-    }
-    required_columns = {
-        "guardians": {
-            "guardian_id", "name", "name_kana", "phone", "email",
-            "password_hash", "priority_points", "created_at",
-        },
-        "children": {
-            "child_id", "guardian_id", "name", "name_kana", "birth_date",
-            "karte_status", "karte_reviewed_at", "created_at",
-        },
-        "operating_days": {"care_date", "is_open"},
-    }
-    rows_by_table: dict[str, list[dict[str, str]]] = {}
-    for table, path in csv_files.items():
-        if not path.is_file():
-            raise FileNotFoundError(f"Required CSV file not found: {path}")
-        with path.open(encoding="utf-8-sig", newline="") as source:
-            reader = csv.DictReader(source)
-            if reader.fieldnames is None or not required_columns[table].issubset(
-                reader.fieldnames
-            ):
-                raise ValueError(f"CSV has missing columns: {path}")
-            rows_by_table[table] = list(reader)
-
-    with closing(sqlite3.connect(database_path)) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.row_factory = sqlite3.Row
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS csv_import_ids (
-                    source_table TEXT NOT NULL,
-                    source_id TEXT NOT NULL,
-                    target_id INTEGER NOT NULL,
-                    PRIMARY KEY (source_table, source_id)
-                )
-                """
-            )
-            guardian_ids: dict[str, int] = {}
-            for row in rows_by_table["guardians"]:
-                email = row["email"].strip().casefold()
-                if not email:
-                    raise ValueError("guardians.csv contains an empty email")
-                connection.execute(
-                    """
-                    INSERT INTO guardians (
-                        name, name_kana, phone, email, password_hash,
-                        priority_points, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(email) DO UPDATE SET
-                        name = excluded.name,
-                        name_kana = excluded.name_kana,
-                        phone = excluded.phone
-                    """,
-                    (
-                        row["name"],
-                        row["name_kana"] or None,
-                        row["phone"],
-                        email,
-                        row["password_hash"] or "dummy_hash",
-                        int(row["priority_points"] or 0),
-                        row["created_at"],
-                    ),
-                )
-                guardian = connection.execute(
-                    "SELECT guardian_id FROM guardians WHERE email = ?", (email,)
-                ).fetchone()
-                guardian_ids[row["guardian_id"]] = guardian["guardian_id"]
-
-            for row in rows_by_table["children"]:
-                guardian_id = guardian_ids.get(row["guardian_id"])
-                if guardian_id is None:
+            with zipfile.ZipFile(CSV_ARCHIVE_PATH) as archive:
+                if set(CSV_TABLE_IMPORT_ORDER) != set(table_names):
                     raise ValueError(
-                        f"children.csv references unknown guardian_id: {row['guardian_id']}"
+                        "CSV import order does not cover the SQL schema tables"
                     )
-                imported_child = connection.execute(
-                    """
-                    SELECT target_id FROM csv_import_ids
-                    WHERE source_table = 'children' AND source_id = ?
-                    """,
-                    (row["child_id"],),
-                ).fetchone()
-                child = None
-                if imported_child is not None:
-                    child = connection.execute(
-                        "SELECT child_id FROM children WHERE child_id = ?",
-                        (imported_child["target_id"],),
-                    ).fetchone()
-                if child is None:
-                    child = connection.execute(
-                        """
-                        SELECT child_id FROM children
-                        WHERE guardian_id = ? AND name = ? AND birth_date = ?
-                          AND child_id NOT IN (
-                              SELECT target_id FROM csv_import_ids
-                              WHERE source_table = 'children'
-                          )
-                        ORDER BY child_id
-                        LIMIT 1
-                        """,
-                        (guardian_id, row["name"], row["birth_date"]),
-                    ).fetchone()
-                values = (
-                    row["karte_status"],
-                    row["karte_reviewed_at"] or None,
-                    row["created_at"],
-                )
-                if child is None:
-                    connection.execute(
-                        """
-                        INSERT INTO children (
-                            guardian_id, name, name_kana, birth_date,
-                            karte_status, karte_reviewed_at, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            guardian_id,
-                            row["name"],
-                            row["name_kana"] or None,
-                            row["birth_date"],
-                            row["karte_status"],
-                            row["karte_reviewed_at"] or None,
-                            row["created_at"],
-                        ),
+                csv_members = {
+                    Path(member.filename).stem: member
+                    for member in archive.infolist()
+                    if member.filename.lower().endswith(".csv")
+                }
+                if set(csv_members) != set(table_names):
+                    raise ValueError(
+                        "CSV archive tables do not match the SQL schema: "
+                        f"expected {sorted(table_names)}, got {sorted(csv_members)}"
                     )
-                    child_id = connection.execute(
-                        "SELECT last_insert_rowid()"
-                    ).fetchone()[0]
-                else:
-                    connection.execute(
-                        """
-                        UPDATE children
-                        SET guardian_id = ?, name = ?, name_kana = ?, birth_date = ?,
-                            karte_status = ?,
-                            karte_reviewed_at = ?, created_at = ?
-                        WHERE child_id = ?
-                        """,
-                        (
-                            guardian_id,
-                            row["name"],
-                            row["name_kana"] or None,
-                            row["birth_date"],
-                            *values,
-                            child["child_id"],
-                        ),
-                    )
-                    child_id = child["child_id"]
-                connection.execute(
-                    """
-                    INSERT INTO csv_import_ids (source_table, source_id, target_id)
-                    VALUES ('children', ?, ?)
-                    ON CONFLICT(source_table, source_id)
-                    DO UPDATE SET target_id = excluded.target_id
-                    """,
-                    (row["child_id"], child_id),
-                )
 
-            for row in rows_by_table["operating_days"]:
-                connection.execute(
-                    """
-                    INSERT INTO operating_days (care_date, is_open)
-                    VALUES (?, ?)
-                    ON CONFLICT(care_date) DO UPDATE SET is_open = excluded.is_open
-                    """,
-                    (row["care_date"], int(row["is_open"])),
-                )
+                for table in CSV_TABLE_IMPORT_ORDER:
+                    member = csv_members[table]
+                    text = archive.read(member).decode("utf-8-sig")
+                    reader = csv.DictReader(io.StringIO(text, newline=""))
+                    columns = [
+                        row[1]
+                        for row in connection.execute(
+                            f'PRAGMA table_info("{table}")'
+                        )
+                    ]
+                    if reader.fieldnames != columns:
+                        raise ValueError(
+                            f"CSV columns do not match the {table} table schema"
+                        )
+                    not_null_columns = {
+                        row[1]
+                        for row in connection.execute(
+                            f'PRAGMA table_info("{table}")'
+                        )
+                        if row[3] or row[5]
+                    }
+                    placeholders = ", ".join("?" for _ in columns)
+                    column_list = ", ".join(f'"{column}"' for column in columns)
+                    insert_sql = (
+                        f'INSERT INTO "{table}" ({column_list}) '
+                        f"VALUES ({placeholders})"
+                    )
+                    rows = [
+                        tuple(
+                            value if value != "" or column in not_null_columns else None
+                            for column, value in row.items()
+                        )
+                        for row in reader
+                    ]
+                    connection.executemany(insert_sql, rows)
+                    imported_count = connection.execute(
+                        f'SELECT COUNT(*) FROM "{table}"'
+                    ).fetchone()[0]
+                    if imported_count != len(rows):
+                        raise RuntimeError(
+                            f"Imported {imported_count} of {len(rows)} "
+                            f"CSV rows for table {table}"
+                        )
+
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(f"CSV data violates foreign keys: {violations[:5]}")
+            connection.execute(f"PRAGMA user_version = {CSV_DATASET_VERSION}")
             connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+
+        os.replace(staged_path, path)
+    except Exception:
+        if staged_path.exists():
+            staged_path.unlink()
+        raise
 
 
 def create_app(database_path: str | Path | None = None) -> Flask:
@@ -310,8 +205,6 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         database_path or os.environ.get("HOIKU_DATABASE", ROOT / "childcare.db")
     )
     initialize_database(app.config["DATABASE"])
-    import_csv_data(app.config["DATABASE"])
-    seed_test_accounts(app.config["DATABASE"])
 
     @app.get("/")
     def home() -> Response:
