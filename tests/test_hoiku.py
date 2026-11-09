@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 
 from hoiku import create_app
-from werkzeug.security import check_password_hash
 
 
 class ReservationApiTests(unittest.TestCase):
@@ -14,6 +13,11 @@ class ReservationApiTests(unittest.TestCase):
         database_path = Path(self.temp_dir.name) / "test.db"
         self.app = create_app(database_path)
         self.client = self.app.test_client()
+        with closing(sqlite3.connect(database_path)) as connection:
+            connection.execute(
+                "UPDATE children SET karte_status = 'approved' WHERE child_id = 1"
+            )
+            connection.commit()
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -42,21 +46,32 @@ class ReservationApiTests(unittest.TestCase):
         days = {day["care_date"]: day for day in response.json["days"]}
         self.assertEqual(days["2026-11-01"]["status"], "closed")
         self.assertEqual(days["2026-11-10"]["status"], "open")
-        self.assertEqual(days["2026-11-10"]["remaining_min"], 14)
+        self.assertEqual(days["2026-11-10"]["remaining_min"], 15)
 
     def test_monthly_availability_rejects_invalid_month(self) -> None:
         response = self.client.get("/api/availability/month?year=2026&month=13")
 
         self.assertEqual(response.status_code, 400)
 
-    def test_csv_data_is_imported_without_duplicates(self) -> None:
+    def test_database_matches_csv_and_keeps_runtime_changes(self) -> None:
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
             initial_counts = (
                 connection.execute("SELECT COUNT(*) FROM guardians").fetchone()[0],
                 connection.execute("SELECT COUNT(*) FROM children").fetchone()[0],
                 connection.execute("SELECT COUNT(*) FROM operating_days").fetchone()[0],
             )
-        self.assertEqual(initial_counts, (39, 53, 30))
+            csv_only_accounts = connection.execute(
+                """
+                SELECT COUNT(*) FROM guardians
+                WHERE email IN ('hogo1@example.com', 'hogo2@example.com')
+                """
+            ).fetchone()[0]
+            approved_status = connection.execute(
+                "SELECT karte_status FROM children WHERE child_id = 1"
+            ).fetchone()[0]
+        self.assertEqual(initial_counts, (36, 50, 30))
+        self.assertEqual(csv_only_accounts, 0)
+        self.assertEqual(approved_status, "approved")
 
         create_app(self.app.config["DATABASE"])
 
@@ -66,23 +81,7 @@ class ReservationApiTests(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM children").fetchone()[0],
                 connection.execute("SELECT COUNT(*) FROM operating_days").fetchone()[0],
             )
-            account_children = connection.execute(
-                """
-                SELECT g.email, c.name
-                FROM guardians g
-                JOIN children c ON c.guardian_id = g.guardian_id
-                WHERE g.email IN ('hogo1@example.com', 'hogo2@example.com')
-                ORDER BY g.email
-                """
-            ).fetchall()
         self.assertEqual(repeated_counts, initial_counts)
-        self.assertEqual(
-            account_children,
-            [
-                ("hogo1@example.com", "佐藤 太郎"),
-                ("hogo2@example.com", "鈴木 愛"),
-            ],
-        )
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
             siblings = connection.execute(
                 """
@@ -161,46 +160,18 @@ class ReservationApiTests(unittest.TestCase):
         self.assertIn("正しくありません".encode(), response.data)
         response.close()
 
-    def test_seeded_test_accounts_can_log_in(self) -> None:
-        accounts = (
-            ("hogo1@example.com", "satou", "佐藤 敏夫", "佐藤 太郎"),
-            ("hogo2@example.com", "suzuki", "鈴木 一郎", "鈴木 愛"),
+    def test_csv_password_placeholders_do_not_allow_login(self) -> None:
+        response = self.client.post(
+            "/login",
+            data={
+                "email": "guardian01@example.com",
+                "password": "any-password",
+            },
+            follow_redirects=True,
         )
-        for email, password, guardian_name, child_name in accounts:
-            with self.subTest(email=email):
-                response = self.client.post(
-                    "/login",
-                    data={"email": email, "password": password},
-                )
-                self.assertEqual(
-                    response.headers["Location"], "/html/user_home.html"
-                )
-                mypage = self.client.get("/html/user_home.html")
-                self.assertIn(guardian_name.encode(), mypage.data)
-                self.assertIn(child_name.encode(), mypage.data)
-                other_child = "鈴木 愛" if email == "hogo1@example.com" else "佐藤 太郎"
-                self.assertNotIn(other_child.encode(), mypage.data)
-                mypage.close()
-                self.client.get("/logout")
-
-        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
-            for email, password, _, child_name in accounts:
-                password_hash = connection.execute(
-                    "SELECT password_hash FROM guardians WHERE email = ?",
-                    (email,),
-                ).fetchone()[0]
-                self.assertNotEqual(password_hash, password)
-                self.assertTrue(check_password_hash(password_hash, password))
-                child = connection.execute(
-                    """
-                    SELECT c.name
-                    FROM children c
-                    JOIN guardians g ON g.guardian_id = c.guardian_id
-                    WHERE g.email = ?
-                    """,
-                    (email,),
-                ).fetchone()
-                self.assertEqual(child[0], child_name)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("正しくありません".encode(), response.data)
+        response.close()
 
     def test_registration_rejects_duplicate_email(self) -> None:
         response = self.client.post(
@@ -208,7 +179,7 @@ class ReservationApiTests(unittest.TestCase):
             data={
                 "name": "重複テスト",
                 "phone": "090-1111-2222",
-                "email": "HANAKO@example.com",
+                "email": "GUARDIAN01@example.com",
                 "password": "test-password-123",
             },
             follow_redirects=True,
@@ -228,7 +199,7 @@ class ReservationApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json["fee_yen"], 4800)
+        self.assertEqual(response.json["fee_yen"], 4000)
         self.assertEqual(response.json["course"], "morning")
 
         reservation_id = response.json["reservation_id"]
@@ -248,7 +219,7 @@ class ReservationApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json["fee_yen"], 4800)
+        self.assertEqual(response.json["fee_yen"], 4000)
         self.assertEqual(response.json["start_hour"], 13)
         self.assertEqual(response.json["end_hour"], 17)
 
@@ -263,7 +234,7 @@ class ReservationApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json["fee_yen"], 9600)
+        self.assertEqual(response.json["fee_yen"], 8000)
         self.assertEqual(response.json["start_hour"], 9)
         self.assertEqual(response.json["end_hour"], 17)
 
@@ -286,7 +257,7 @@ class ReservationApiTests(unittest.TestCase):
             morning.json["reservation_id"],
         )
         self.assertEqual(afternoon.json["course"], "full_day")
-        self.assertEqual(afternoon.json["fee_yen"], 9600)
+        self.assertEqual(afternoon.json["fee_yen"], 8000)
 
     def test_rejects_duplicate_or_invalid_course(self) -> None:
         payload = {
