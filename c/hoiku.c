@@ -675,7 +675,6 @@ int hoiku_cancel(sqlite3 *db, sqlite3_int64 reservation_id, char *error,
                  size_t error_size)
 {
     sqlite3_stmt *statement = NULL;
-    int result;
 
     if (error != NULL && error_size > 0) {
         error[0] = '\0';
