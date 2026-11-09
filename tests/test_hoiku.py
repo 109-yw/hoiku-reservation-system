@@ -26,11 +26,6 @@ class ReservationApiTests(unittest.TestCase):
         shutil.copy2(self.base_database, database_path)
         self.app = create_app(database_path)
         self.client = self.app.test_client()
-        with closing(sqlite3.connect(database_path)) as connection:
-            connection.execute(
-                "UPDATE children SET karte_status = 'approved' WHERE child_id = 1"
-            )
-            connection.commit()
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -79,12 +74,12 @@ class ReservationApiTests(unittest.TestCase):
                 WHERE email IN ('hogo1@example.com', 'hogo2@example.com')
                 """
             ).fetchone()[0]
-            approved_status = connection.execute(
-                "SELECT karte_status FROM children WHERE child_id = 1"
+            approved_status_count = connection.execute(
+                "SELECT COUNT(*) FROM children WHERE karte_status = 'approved'"
             ).fetchone()[0]
         self.assertEqual(initial_counts, (36, 50, 30))
         self.assertEqual(csv_only_accounts, 0)
-        self.assertEqual(approved_status, "approved")
+        self.assertEqual(approved_status_count, 50)
 
         create_app(self.app.config["DATABASE"])
 

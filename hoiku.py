@@ -301,6 +301,65 @@ def sync_guardian_passwords(database_path: str | Path) -> None:
             raise
 
 
+def sync_child_karte_statuses(database_path: str | Path) -> None:
+    csv_path = ROOT / "SQL" / "children.csv"
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Required CSV file not found: {csv_path}")
+
+    updates: list[tuple[int, int, str, str | None]] = []
+    seen_child_ids: set[int] = set()
+    with csv_path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        required_columns = {
+            "child_id",
+            "guardian_id",
+            "karte_status",
+            "karte_reviewed_at",
+        }
+        if reader.fieldnames is None or not required_columns.issubset(
+            reader.fieldnames
+        ):
+            raise ValueError(f"CSV has missing child-karte columns: {csv_path}")
+
+        for row in reader:
+            try:
+                child_id = int(row["child_id"])
+                guardian_id = int(row["guardian_id"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("children.csv contains an invalid child or guardian ID") from error
+            status = row["karte_status"] or ""
+            if status not in {"draft", "submitted", "approved", "rejected"}:
+                raise ValueError(f"children.csv contains an invalid karte_status: {status}")
+            if child_id in seen_child_ids:
+                raise ValueError(f"children.csv contains duplicate child_id: {child_id}")
+            seen_child_ids.add(child_id)
+            updates.append(
+                (child_id, guardian_id, status, row["karte_reviewed_at"] or None)
+            )
+
+    with closing(sqlite3.connect(database_path, timeout=10)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for child_id, guardian_id, status, reviewed_at in updates:
+                cursor = connection.execute(
+                    """
+                    UPDATE children
+                    SET karte_status = ?, karte_reviewed_at = ?
+                    WHERE child_id = ? AND guardian_id = ?
+                    """,
+                    (status, reviewed_at, child_id, guardian_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        "children.csv child/guardian IDs do not match the database "
+                        f"for child_id {child_id}"
+                    )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
 def create_app(database_path: str | Path | None = None) -> Flask:
     app = Flask(__name__)
     app.secret_key = os.environ.get("HOIKU_SECRET_KEY") or secrets.token_hex(32)
@@ -314,6 +373,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
     )
     initialize_database(app.config["DATABASE"])
     sync_guardian_passwords(app.config["DATABASE"])
+    sync_child_karte_statuses(app.config["DATABASE"])
 
     @app.get("/")
     def home() -> Response:
