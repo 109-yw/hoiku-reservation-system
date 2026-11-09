@@ -1,0 +1,187 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>マイページ｜一時保育予約システム</title>
+
+<style>
+body {
+    font-family: sans-serif;
+    background-color: #f0f6fa;
+    margin: 0;
+}
+
+header {
+    background-color: #78b5d6;
+    color: white;
+    text-align: center;
+    padding: 30px 15px;
+}
+
+header h1 {
+    margin: 0;
+}
+
+main {
+    max-width: 550px;
+    margin: 40px auto;
+    padding: 20px;
+}
+
+h2 {
+    text-align: center;
+}
+
+.card {
+    background: white;
+    border: 2px solid #78b5d6;
+    border-radius: 12px;
+    padding: 25px;
+    margin: 20px 0;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+}
+
+.card h3 {
+    margin-top: 0;
+    color: #559ac2;
+}
+
+.info {
+    padding: 10px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.point {
+    font-size: 32px;
+    font-weight: bold;
+    color: #559ac2;
+    text-align: center;
+    margin: 20px 0;
+}
+
+.menu {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    background: #78b5d6;
+    color: white;
+    text-align: center;
+    text-decoration: none;
+    padding: 15px;
+    margin-top: 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.menu:hover {
+    background: #559ac2;
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 5px 12px rgba(0,0,0,0.15);
+}
+
+.cancel {
+    background: #e67c7c;
+}
+
+.cancel:hover {
+    background: #d45f5f;
+}
+
+.logout {
+    display: block;
+    text-align: center;
+    margin-top: 30px;
+    color: #559ac2;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <h1>一時保育予約システム</h1>
+    <p>登録者専用マイページ</p>
+</header>
+
+<main>
+
+<h2>マイページ</h2>
+
+<!-- 予約確認 -->
+<div class="card">
+    <h3>予約内容の確認</h3>
+
+    {% if reservations %}
+
+        {% for reservation in reservations %}
+
+        <div class="info">
+            <p>予約日：{{ reservation.date }}</p>
+            <p>利用時間：{{ reservation.time }}</p>
+            <p>お子様の人数：{{ reservation.child_count }}人</p>
+            <p>予約状況：予約済み</p>
+
+            <!-- キャンセル -->
+            <form action="/cancel" method="POST"
+                  onsubmit="return confirmCancel()">
+
+                <input type="hidden"
+                       name="reservation_id"
+                       value="{{ reservation.id }}">
+
+                <button type="submit" class="menu cancel">
+                    この予約をキャンセル
+                </button>
+            </form>
+        </div>
+
+        {% endfor %}
+
+    {% else %}
+
+        <p>現在予約はありません。</p>
+
+    {% endif %}
+
+    <a href="reservation.html" class="menu">
+        新しく予約する
+    </a>
+</div>
+
+<!-- 優先ポイント -->
+<div class="card">
+    <h3>優先ポイント確認</h3>
+
+    <p>現在の優先ポイント</p>
+
+    <div class="point">
+        {{ points }} ポイント
+    </div>
+
+    <p>
+        優先ポイントはキャンセル待ちの
+        優先順位を決める際に使用されます。
+    </p>
+</div>
+
+<a href="hoiku.html" class="logout">
+    ログアウト
+</a>
+
+</main>
+
+<script>
+function confirmCancel() {
+    return confirm(
+        "この予約をキャンセルしますか？"
+    );
+}
+</script>
+
+</body>
+</html>
