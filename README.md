@@ -40,6 +40,42 @@ CSV内の保護者アカウントはパスワードが `dummy_hash` のため、
 
 予約は承認済みカルテの児童のみ受け付け、予約日の年齢区分から料金と保育士コストを決めます。仮押さえ作成・確定時はSQLiteの `BEGIN IMMEDIATE` で同時更新を直列化します。
 
+## C言語の予約ロジック
+
+C言語の予約処理は `c/hoiku.c`、公開関数の宣言は `c/hoiku.h` にあります。既存のSQLiteデータベースを開き、その接続（`sqlite3 *`）を関数に渡して使います。ヘッダーは `../SQL/sqlite3.h` を参照するため、リポジトリ内の `SQL/` フォルダと `c/` フォルダの配置を保ってください。
+
+### 実装している機能
+
+- **同時予約の排他制御:** 予約の確認から登録まで `BEGIN IMMEDIATE` トランザクションで直列化します。SQLiteが使用中の場合は最大10秒待ちます。成功時の `COMMIT`、失敗時の `ROLLBACK` でトランザクションとロックを終了します。
+- **予約とキャンセル待ち:** `hoiku_reserve` は開所日、予約時間、児童の承認状態を確認して予約します。予約時間は9時から17時まで、2時間以上で指定できます。利用可能なら仮押さえ（`held`）と時間枠を登録し、上限を超える場合は時間枠を確保せずキャンセル待ち（`waitlisted`）に登録します。
+- **年齢別リソース計算:** 予約日の生年月日から児童の月齢を計算し、`age_classes` から料金と `staff_cost` を取得します。予約する各1時間枠について、利用中の児童数と保育士コストを合計します。人数は `operating_days.max_children`、保育士コストは `operating_days.staff_count` と5人分のうち小さい方を上限に判定します。
+- **キャンセル待ちの優先順位:** `hoiku_get_waitlist_order` は保護者の `priority_points` が多い順、同じポイントなら受付時刻が早い順に予約IDを返します。受付時刻は `attempted_at_ms` 引数でUnix時刻のミリ秒として渡します。
+- **キャンセルと枠の解放:** `hoiku_cancel` は予約状態をキャンセルにし、その予約の時間枠を削除します。キャンセルによって空いた枠からキャンセル待ちを自動で繰り上げる処理はありません。
+
+### C APIの使い方
+
+最初に `hoiku_initialize(db, error, sizeof(error))` を呼び、SQLite接続の設定を行います。予約APIの戻り値は `HOIKU_RESERVED`（仮押さえ登録）、`HOIKU_WAITLISTED`（キャンセル待ち登録）、`HOIKU_ERROR`（失敗）です。失敗時は `error` に説明が入り、成功時は `reservation_id` に予約IDが入ります。
+
+```c
+#include "c/hoiku.h"
+
+char error[512];
+sqlite3_int64 reservation_id;
+int result = hoiku_reserve(
+    db,
+    1,                  /* 児童ID */
+    "2026-11-11",       /* 予約日 */
+    9, 12,              /* 9時から12時まで */
+    attempted_at_ms,    /* 申込受付時刻（Unix時刻のミリ秒） */
+    &reservation_id,
+    error, sizeof(error)
+);
+```
+
+キャンセル待ち一覧の配列は呼び出し側が `free()` で解放します。`c/hoiku.c` は `main` 関数を持たない部品のため、単独では実行ファイルになりません。VS CodeのCビルドタスクではオブジェクトファイルとしてコンパイルします。実際にアプリとして実行する場合は、`main` 関数を持つプログラムと `SQL/sqlite3.c` を合わせてビルド・リンクしてください。
+
+このCロジックとPython APIはまだ接続されていません。Cロジック用のDBは、記載のテーブルと列を持つ `childcare_v2.sql` で初期化してください。
+
 テスト:
 
 ```powershell
