@@ -4,13 +4,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>利用者トップページ</title>
+<title>マイページ｜一時保育予約システム</title>
 
 <style>
 body {
     font-family: sans-serif;
     background: #f0f6fa;
     margin: 0;
+    color: #333;
 }
 
 header {
@@ -21,46 +22,63 @@ header {
 }
 
 .container {
-    max-width: 800px;
-    margin: 50px auto;
+    max-width: 900px;
+    margin: 40px auto;
     padding: 0 20px;
 }
 
-.welcome {
-    text-align: center;
-    margin-bottom: 30px;
-}
-
-.menu {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 20px;
-}
-
-.menu a {
+.card {
     background: white;
-    padding: 35px 15px;
     border-radius: 12px;
+    padding: 25px;
+    margin-bottom: 25px;
     box-shadow: 0 4px 15px #0001;
+}
+
+.card h2 {
+    color: #559ac2;
+    margin-top: 0;
+}
+
+.reservation {
+    background: #f0f6fa;
+    padding: 20px;
+    border-radius: 10px;
+    margin-top: 15px;
+}
+
+.point {
+    font-size: 36px;
+    font-weight: bold;
+    color: #559ac2;
     text-align: center;
+    margin: 20px 0;
+}
+
+.button {
+    display: inline-block;
+    padding: 14px 25px;
+    background: #78b5d6;
+    color: white;
+    border: none;
+    border-radius: 8px;
     text-decoration: none;
-    color: #333;
+    cursor: pointer;
+    font-size: 15px;
     transition: 0.2s;
 }
 
-.menu a:hover {
-    transform: translateY(-5px) scale(1.02);
-    box-shadow: 0 8px 20px #0002;
+.button:hover {
+    background: #559ac2;
+    transform: translateY(-3px);
 }
 
-.menu h2 {
-    color: #559ac2;
-    font-size: 20px;
+.cancel {
+    background: #e58b8b;
 }
 
-.menu p {
-    color: #666;
-    font-size: 14px;
+.cancel:hover {
+    background: #cf6666;
 }
 
 .logout {
@@ -73,19 +91,12 @@ header {
     border-radius: 8px;
     text-align: center;
     text-decoration: none;
-    transition: 0.2s;
 }
 
 .logout:hover {
     background: #559ac2;
-    transform: translateY(-3px);
 }
 
-@media (max-width: 600px) {
-    .menu {
-        grid-template-columns: 1fr;
-    }
-}
 </style>
 </head>
 
@@ -93,87 +104,112 @@ header {
 
 <header>
     <h1>一時保育予約システム</h1>
-    <p>利用者トップページ</p>
+    <p>利用者マイページ</p>
 </header>
 
 <div class="container">
 
-<h2>マイページ</h2>
-<p>ようこそ、{{ name }} さん</p>
+    <h2>ようこそ、{{ name }} さん</h2>
 
-<div class="card">
-    <h3>お子様</h3>
-    {% if children %}
-    <ul>
-        {% for child in children %}
-        <li>{{ child.name }}（{{ child.birth_date }}）</li>
-        {% endfor %}
-    </ul>
-    {% else %}
-    <p>登録されているお子様はいません。</p>
-    {% endif %}
-    <p>優先ポイント：{{ points }} ポイント</p>
-</div>
+    <!-- お子様情報 -->
+    <div class="card">
+        <h2>お子様情報</h2>
 
-<!-- 予約確認 -->
-<div class="card">
-    <h3>予約内容の確認</h3>
-
-    {% if reservations %}
-
-        {% for reservation in reservations %}
-
-        <div class="info">
-            <p>予約日：{{ reservation.date }}</p>
-            <p>利用時間：{{ reservation.time }}</p>
-            <p>お子様：{{ reservation.child_name }}</p>
-            <p>予約状況：{{ reservation.status }}</p>
-
-            {% if reservation.status == "仮押さえ中" %}
-            <form action="/cancel" method="POST"
-                  onsubmit="return confirmCancel()">
-
-                <input type="hidden"
-                       name="reservation_id"
-                       value="{{ reservation.id }}">
-
-                <button type="submit" class="menu cancel">
-                    この予約をキャンセル
-                </button>
-            </form>
-            {% endif %}
-        </div>
-
-        {% endfor %}
-    {% endif %}
-
-    <div class="menu">
-
-        <a href="reservation.html">
-            <h2>新規予約</h2>
-            <p>カレンダーから予約する</p>
-        </a>
-
-        <a href="/html/reservation_check.html">
-            <h2>予約の確認</h2>
-            <p>現在の予約状況を確認する</p>
-        </a>
-
-        <a href="/html/reservation_cancel.html">
-            <h2>予約キャンセル</h2>
-            <p>予約済みの予定を取り消す</p>
-        </a>
-
-        <a href="/html/points.html">
-            <h2>優先ポイント確認</h2>
-            <p>現在の優先ポイントを確認する</p>
-        </a>
-
+        {% if children %}
+            <ul>
+                {% for child in children %}
+                    <li>
+                        {{ child.name }}
+                        （{{ child.birth_date }}）
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>登録されているお子様はいません。</p>
+        {% endif %}
     </div>
 
-    <a href="/" class="logout">ログアウト</a>
+    <!-- 新規予約 -->
+    <div class="card">
+        <h2>新規予約</h2>
+        <p>カレンダーから新しい予約を行います。</p>
+
+        <a href="/html/reservation.html" class="button">
+            新しく予約する
+        </a>
+    </div>
+
+    <!-- 予約状況 -->
+    <div class="card">
+        <h2>予約状況の確認</h2>
+
+        {% if reservations %}
+
+            {% for reservation in reservations %}
+
+                <div class="reservation">
+                    <p>予約日：{{ reservation.date }}</p>
+                    <p>利用時間：{{ reservation.time }}</p>
+                    <p>お子様：{{ reservation.child_name }}</p>
+                    <p>予約状況：{{ reservation.status }}</p>
+
+                    <!-- キャンセル可能な予約 -->
+                    {% if reservation.status == "仮押さえ中" %}
+
+                        <form action="/cancel"
+                              method="POST"
+                              onsubmit="return confirmCancel()">
+
+                            <input type="hidden"
+                                   name="reservation_id"
+                                   value="{{ reservation.id }}">
+
+                            <button type="submit"
+                                    class="button cancel">
+                                この予約をキャンセル
+                            </button>
+                        </form>
+
+                    {% endif %}
+                </div>
+
+            {% endfor %}
+
+        {% else %}
+
+            <p>現在予約はありません。</p>
+
+        {% endif %}
+    </div>
+
+    <!-- 優先ポイント -->
+    <div class="card">
+        <h2>優先ポイント確認</h2>
+
+        <p>現在の優先ポイント</p>
+
+        <div class="point">
+            {{ points }} ポイント
+        </div>
+
+        <p>
+            優先ポイントは、キャンセル待ちの
+            優先順位を決める際に使用されます。
+        </p>
+    </div>
+
+    <a href="/logout" class="logout">
+        ログアウト
+    </a>
 
 </div>
+
+<script>
+function confirmCancel() {
+    return confirm("この予約をキャンセルしますか？");
+}
+</script>
 
 </body>
 </html>
+
