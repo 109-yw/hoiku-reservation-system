@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import os
 import secrets
 import sqlite3
@@ -56,8 +57,6 @@ def initialize_database(database_path: str | Path) -> None:
             raise RuntimeError(f"Database already contains unrelated tables: {path}")
         else:
             connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-
-    seed_test_accounts(path)
 
 
 def seed_test_accounts(database_path: str | Path) -> None:
@@ -120,6 +119,135 @@ def seed_test_accounts(database_path: str | Path) -> None:
         connection.commit()
 
 
+def import_csv_data(database_path: str | Path) -> None:
+    csv_directory = ROOT / "SQL"
+    csv_files = {
+        "guardians": csv_directory / "guardians.csv",
+        "children": csv_directory / "children.csv",
+        "operating_days": csv_directory / "operating_days.csv",
+    }
+    required_columns = {
+        "guardians": {
+            "guardian_id", "name", "name_kana", "phone", "email",
+            "password_hash", "priority_points", "created_at",
+        },
+        "children": {
+            "child_id", "guardian_id", "name", "name_kana", "birth_date",
+            "karte_status", "karte_reviewed_at", "created_at",
+        },
+        "operating_days": {"care_date", "is_open"},
+    }
+    rows_by_table: dict[str, list[dict[str, str]]] = {}
+    for table, path in csv_files.items():
+        if not path.is_file():
+            raise FileNotFoundError(f"Required CSV file not found: {path}")
+        with path.open(encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            if reader.fieldnames is None or not required_columns[table].issubset(
+                reader.fieldnames
+            ):
+                raise ValueError(f"CSV has missing columns: {path}")
+            rows_by_table[table] = list(reader)
+
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            guardian_ids: dict[str, int] = {}
+            for row in rows_by_table["guardians"]:
+                email = row["email"].strip().casefold()
+                if not email:
+                    raise ValueError("guardians.csv contains an empty email")
+                connection.execute(
+                    """
+                    INSERT INTO guardians (
+                        name, name_kana, phone, email, password_hash,
+                        priority_points, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(email) DO UPDATE SET
+                        name = excluded.name,
+                        name_kana = excluded.name_kana,
+                        phone = excluded.phone
+                    """,
+                    (
+                        row["name"],
+                        row["name_kana"] or None,
+                        row["phone"],
+                        email,
+                        row["password_hash"] or "dummy_hash",
+                        int(row["priority_points"] or 0),
+                        row["created_at"],
+                    ),
+                )
+                guardian = connection.execute(
+                    "SELECT guardian_id FROM guardians WHERE email = ?", (email,)
+                ).fetchone()
+                guardian_ids[row["guardian_id"]] = guardian["guardian_id"]
+
+            for row in rows_by_table["children"]:
+                guardian_id = guardian_ids.get(row["guardian_id"])
+                if guardian_id is None:
+                    raise ValueError(
+                        f"children.csv references unknown guardian_id: {row['guardian_id']}"
+                    )
+                child = connection.execute(
+                    """
+                    SELECT child_id FROM children
+                    WHERE guardian_id = ? AND name = ? AND birth_date = ?
+                    """,
+                    (guardian_id, row["name"], row["birth_date"]),
+                ).fetchone()
+                values = (
+                    row["name_kana"] or None,
+                    row["karte_status"],
+                    row["karte_reviewed_at"] or None,
+                    row["created_at"],
+                )
+                if child is None:
+                    connection.execute(
+                        """
+                        INSERT INTO children (
+                            guardian_id, name, name_kana, birth_date,
+                            karte_status, karte_reviewed_at, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            guardian_id,
+                            row["name"],
+                            row["name_kana"] or None,
+                            row["birth_date"],
+                            row["karte_status"],
+                            row["karte_reviewed_at"] or None,
+                            row["created_at"],
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE children
+                        SET name_kana = ?, karte_status = ?,
+                            karte_reviewed_at = ?, created_at = ?
+                        WHERE child_id = ?
+                        """,
+                        (*values, child["child_id"]),
+                    )
+
+            for row in rows_by_table["operating_days"]:
+                connection.execute(
+                    """
+                    INSERT INTO operating_days (care_date, is_open)
+                    VALUES (?, ?)
+                    ON CONFLICT(care_date) DO UPDATE SET is_open = excluded.is_open
+                    """,
+                    (row["care_date"], int(row["is_open"])),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
 def create_app(database_path: str | Path | None = None) -> Flask:
     app = Flask(__name__)
     app.secret_key = os.environ.get("HOIKU_SECRET_KEY") or secrets.token_hex(32)
@@ -132,6 +260,8 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         database_path or os.environ.get("HOIKU_DATABASE", ROOT / "childcare.db")
     )
     initialize_database(app.config["DATABASE"])
+    import_csv_data(app.config["DATABASE"])
+    seed_test_accounts(app.config["DATABASE"])
 
     @app.get("/")
     def home() -> Response:

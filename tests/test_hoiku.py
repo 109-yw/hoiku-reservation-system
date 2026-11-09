@@ -1,4 +1,5 @@
 from contextlib import closing
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -38,17 +39,51 @@ class ReservationApiTests(unittest.TestCase):
         response = self.client.get("/api/availability/month?year=2026&month=11")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            [day["care_date"] for day in response.json["days"]],
-            ["2026-11-10", "2026-11-11"],
-        )
-        self.assertEqual(response.json["days"][0]["status"], "open")
-        self.assertEqual(response.json["days"][0]["remaining_min"], 14)
+        self.assertEqual(len(response.json["days"]), 30)
+        days = {day["care_date"]: day for day in response.json["days"]}
+        self.assertEqual(days["2026-11-01"]["status"], "closed")
+        self.assertEqual(days["2026-11-10"]["status"], "open")
+        self.assertEqual(days["2026-11-10"]["remaining_min"], 14)
 
     def test_monthly_availability_rejects_invalid_month(self) -> None:
         response = self.client.get("/api/availability/month?year=2026&month=13")
 
         self.assertEqual(response.status_code, 400)
+
+    def test_csv_data_is_imported_without_duplicates(self) -> None:
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            initial_counts = (
+                connection.execute("SELECT COUNT(*) FROM guardians").fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM children").fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM operating_days").fetchone()[0],
+            )
+        self.assertEqual(initial_counts, (39, 53, 30))
+
+        create_app(self.app.config["DATABASE"])
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            repeated_counts = (
+                connection.execute("SELECT COUNT(*) FROM guardians").fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM children").fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM operating_days").fetchone()[0],
+            )
+            account_children = connection.execute(
+                """
+                SELECT g.email, c.name
+                FROM guardians g
+                JOIN children c ON c.guardian_id = g.guardian_id
+                WHERE g.email IN ('hogo1@example.com', 'hogo2@example.com')
+                ORDER BY g.email
+                """
+            ).fetchall()
+        self.assertEqual(repeated_counts, initial_counts)
+        self.assertEqual(
+            account_children,
+            [
+                ("hogo1@example.com", "佐藤 太郎"),
+                ("hogo2@example.com", "鈴木 愛"),
+            ],
+        )
 
     def test_register_login_and_logout(self) -> None:
         login_page = self.client.get("/login")

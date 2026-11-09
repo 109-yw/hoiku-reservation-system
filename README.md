@@ -2,7 +2,7 @@
 
 ## Python API（試作）
 
-Python側ではFlaskとSQLiteを使い、予約枠の空き状況確認、仮押さえ、仮押さえの確定・取消を提供します。初回起動時に `SQL/childcare_v2 (1).sql` からデータベースを作成します。スキーマのサンプルデータも登録されます。
+Python側ではFlaskとSQLiteを使い、予約枠の空き状況確認、仮押さえ、仮押さえの確定・取消を提供します。初回起動時に `SQL/childcare_v2 (1).sql` からデータベースを作成し、`SQL/guardians.csv`、`SQL/children.csv`、`SQL/operating_days.csv` のデータを追加・同期します。既存の保護者・児童IDと重複する場合は、保護者メールアドレスおよび児童情報で照合して既存の予約参照を保持します。CSVの処理は起動時に繰り返しても同じデータが重複しません。
 
 ```powershell
 python -m pip install -r requirements.txt
