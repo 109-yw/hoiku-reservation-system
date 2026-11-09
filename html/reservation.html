@@ -183,8 +183,15 @@ input, select {
         <form id="reservationForm">
 
             <label for="childId">児童ID</label>
-            <input id="childId" type="number" min="1" step="1" required>
-            <small>ログイン・児童一覧機能が未実装のため、承認済み児童のIDを入力してください。</small>
+            <input
+    id="childId"
+    type="text"
+    inputmode="numeric"
+    pattern="[0-9]+"
+    placeholder="児童IDを入力してください"
+    required
+>
+            
 
             <label for="time">利用時間</label>
             <select id="time" required>
