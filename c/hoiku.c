@@ -333,6 +333,7 @@ int hoiku_reserve(sqlite3 *db, sqlite3_int64 child_id, const char *care_date,
      * 生年月日と予約日から予約日時点の月齢を計算する。
      * 年の差を月に直し、月の差を足し、誕生日がまだ来ていなければ
      * 1か月引く。得られた月齢をage_classesの範囲に照合する。
+     * 児童と保護者をguardian_idで結合し、CSVから取り込んだ親子関係も確認する。
      */
     if (prepare_sql(
             db,
@@ -344,7 +345,9 @@ int hoiku_reserve(sqlite3 *db, sqlite3_int64 child_id, const char *care_date,
             "       - CAST(strftime('%m', birth_date) AS INTEGER)"
             "    - (strftime('%d', ?) < strftime('%d', birth_date))"
             "      AS age_months"
-            "  FROM children WHERE child_id = ?"
+            "  FROM children c"
+            "  JOIN guardians g ON g.guardian_id = c.guardian_id"
+            "  WHERE c.child_id = ?"
             ")"
             "SELECT a.age_class_id, a.staff_cost, a.hourly_fee_yen"
             " FROM child_age c JOIN age_classes a"

@@ -30,6 +30,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 
 ROOT = Path(__file__).resolve().parent
+
 SCHEMA_PATH = ROOT / "SQL" / "childcare_v2.sql"
 CSV_ARCHIVE_PATH = ROOT / "SQL" / "csv_export_all.zip"
 CSV_DATASET_VERSION = 1
