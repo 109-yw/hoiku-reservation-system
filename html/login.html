@@ -72,6 +72,28 @@ input {
     margin-top: 25px;
     color: #559ac2;
 }
+
+.message {
+    padding: 10px;
+    border-radius: 6px;
+    margin: 15px 0;
+}
+
+.message.error {
+    color: #8b0000;
+    background: #ffe8e8;
+}
+
+.message.success {
+    color: #155724;
+    background: #e6f4ea;
+}
+
+.register {
+    margin-top: 25px;
+    border-top: 1px solid #ddd;
+    padding-top: 15px;
+}
 </style>
 </head>
 
@@ -86,33 +108,51 @@ input {
 
     <h2>ログイン</h2>
 
-    <form onsubmit="login(event)">
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+    <p class="message {{ category }}" role="alert">{{ message }}</p>
+    {% endfor %}
+
+    <form action="/login" method="post">
         <label for="email">メールアドレス</label>
-        <input type="email" id="email" name="email" required>
+        <input type="email" id="email" name="email" autocomplete="email" required>
 
         <label for="password">パスワード</label>
         <input type="password" id="password"
-               name="password" required>
+               name="password" autocomplete="current-password" required>
 
         <button type="submit" class="submit">
             ログイン
         </button>
     </form>
 
-    <a href="hoiku.html" class="back">
+    <section class="register">
+        <h2>新規登録</h2>
+        <form action="/register" method="post">
+            <label for="registerName">保護者氏名</label>
+            <input type="text" id="registerName" name="name"
+                   autocomplete="name" required>
+
+            <label for="phone">電話番号</label>
+            <input type="tel" id="phone" name="phone"
+                   autocomplete="tel" required>
+
+            <label for="registerEmail">メールアドレス</label>
+            <input type="email" id="registerEmail" name="email"
+                   autocomplete="email" required>
+
+            <label for="registerPassword">パスワード（8文字以上）</label>
+            <input type="password" id="registerPassword" name="password"
+                   minlength="8" autocomplete="new-password" required>
+
+            <button type="submit" class="submit">新規登録</button>
+        </form>
+    </section>
+
+    <a href="/" class="back">
         トップページに戻る
     </a>
 
 </div>
-
-<script>
-// ログイン処理（仮）
-function login(event) {
-    event.preventDefault();
-
-    alert("ログイン機能は現在準備中です。");
-}
-</script>
 
 </body>
 </html>

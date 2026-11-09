@@ -1,8 +1,11 @@
+from contextlib import closing
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from hoiku import create_app
+from werkzeug.security import check_password_hash
 
 
 class ReservationApiTests(unittest.TestCase):
@@ -46,6 +49,115 @@ class ReservationApiTests(unittest.TestCase):
         response = self.client.get("/api/availability/month?year=2026&month=13")
 
         self.assertEqual(response.status_code, 400)
+
+    def test_register_login_and_logout(self) -> None:
+        login_page = self.client.get("/login")
+        self.assertEqual(login_page.status_code, 200)
+        self.assertIn(b'action="/login"', login_page.data)
+        self.assertIn(b'action="/register"', login_page.data)
+        login_page.close()
+        self.assertEqual(
+            self.client.get("/html/user_home.html").headers["Location"],
+            "/mypage",
+        )
+
+        registered = self.client.post(
+            "/register",
+            data={
+                "name": "テスト保護者",
+                "phone": "090-1234-5678",
+                "email": "TEST@example.com",
+                "password": "test-password-123",
+            },
+        )
+        self.assertEqual(registered.status_code, 302)
+
+        login = self.client.post(
+            "/login",
+            data={
+                "email": "test@example.com",
+                "password": "test-password-123",
+            },
+        )
+        self.assertEqual(login.status_code, 302)
+        self.assertEqual(login.headers["Location"], "/mypage")
+
+        mypage = self.client.get("/mypage")
+        self.assertEqual(mypage.status_code, 200)
+        self.assertIn("テスト保護者".encode(), mypage.data)
+        self.assertIn(b"0 \xe3\x83\x9d\xe3\x82\xa4\xe3\x83\xb3\xe3\x83\x88", mypage.data)
+        mypage.close()
+
+        logout = self.client.get("/logout")
+        self.assertEqual(logout.headers["Location"], "/login")
+        self.assertEqual(self.client.get("/mypage").headers["Location"], "/login")
+
+    def test_login_rejects_invalid_password(self) -> None:
+        response = self.client.post(
+            "/login",
+            data={
+                "email": "hanako@example.com",
+                "password": "wrong-password",
+            },
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("正しくありません".encode(), response.data)
+        response.close()
+
+    def test_seeded_test_accounts_can_log_in(self) -> None:
+        accounts = (
+            ("hogo1@example.com", "satou", "佐藤 敏夫", "佐藤 太郎"),
+            ("hogo2@example.com", "suzuki", "鈴木 一郎", "鈴木 愛"),
+        )
+        for email, password, guardian_name, _ in accounts:
+            with self.subTest(email=email):
+                response = self.client.post(
+                    "/login",
+                    data={"email": email, "password": password},
+                )
+                self.assertEqual(response.headers["Location"], "/mypage")
+                mypage = self.client.get("/mypage")
+                self.assertIn(guardian_name.encode(), mypage.data)
+                self.assertIn(guardian_name.encode(), mypage.data)
+                mypage.close()
+                self.client.get("/logout")
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            for email, password, _, child_name in accounts:
+                password_hash = connection.execute(
+                    "SELECT password_hash FROM guardians WHERE email = ?",
+                    (email,),
+                ).fetchone()[0]
+                self.assertNotEqual(password_hash, password)
+                self.assertTrue(check_password_hash(password_hash, password))
+                child = connection.execute(
+                    """
+                    SELECT c.name
+                    FROM children c
+                    JOIN guardians g ON g.guardian_id = c.guardian_id
+                    WHERE g.email = ?
+                    """,
+                    (email,),
+                ).fetchone()
+                self.assertEqual(child[0], child_name)
+
+    def test_registration_rejects_duplicate_email(self) -> None:
+        response = self.client.post(
+            "/register",
+            data={
+                "name": "重複テスト",
+                "phone": "090-1111-2222",
+                "email": "HANAKO@example.com",
+                "password": "test-password-123",
+            },
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("すでに登録".encode(), response.data)
+        response.close()
 
     def test_create_and_confirm_hold(self) -> None:
         response = self.client.post(

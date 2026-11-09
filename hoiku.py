@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, g, jsonify, redirect, request, send_from_directory
+from flask import (
+    Flask,
+    Response,
+    flash,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+)
+from jinja2 import FileSystemLoader
+from werkzeug.security import check_password_hash, generate_password_hash
 
 
 ROOT = Path(__file__).resolve().parent
@@ -37,14 +51,83 @@ def initialize_database(database_path: str | Path) -> None:
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
         if any(name == "settings" for (name,) in existing_tables):
-            return
-        if existing_tables:
+            pass
+        elif existing_tables:
             raise RuntimeError(f"Database already contains unrelated tables: {path}")
-        connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        else:
+            connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    seed_test_accounts(path)
+
+
+def seed_test_accounts(database_path: str | Path) -> None:
+    accounts = (
+        ("佐藤 敏夫", "090-1111-1111", "hogo1@example.com", "satou",
+         "佐藤 太郎", "サトウ タロウ", "2020-04-15"),
+        ("鈴木 一郎", "090-2222-2222", "hogo2@example.com", "suzuki",
+         "鈴木 愛", "スズキ アイ", "2021-06-20"),
+    )
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for (
+            guardian_name,
+            phone,
+            email,
+            password,
+            child_name,
+            child_name_kana,
+            birth_date,
+        ) in accounts:
+            connection.execute(
+                """
+                INSERT INTO guardians (name, phone, email, password_hash)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                    name = excluded.name,
+                    phone = excluded.phone,
+                    password_hash = excluded.password_hash
+                """,
+                (guardian_name, phone, email, generate_password_hash(password)),
+            )
+            guardian_id = connection.execute(
+                "SELECT guardian_id FROM guardians WHERE email = ?", (email,)
+            ).fetchone()[0]
+            child = connection.execute(
+                """
+                SELECT child_id FROM children
+                WHERE guardian_id = ? AND name = ?
+                """,
+                (guardian_id, child_name),
+            ).fetchone()
+            if child is None:
+                connection.execute(
+                    """
+                    INSERT INTO children (
+                        guardian_id, name, name_kana, birth_date, karte_status
+                    ) VALUES (?, ?, ?, ?, 'approved')
+                    """,
+                    (guardian_id, child_name, child_name_kana, birth_date),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE children
+                    SET name_kana = ?, birth_date = ?, karte_status = 'approved'
+                    WHERE child_id = ?
+                    """,
+                    (child_name_kana, birth_date, child[0]),
+                )
+        connection.commit()
 
 
 def create_app(database_path: str | Path | None = None) -> Flask:
     app = Flask(__name__)
+    app.secret_key = os.environ.get("HOIKU_SECRET_KEY") or secrets.token_hex(32)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+    )
+    app.jinja_loader = FileSystemLoader(ROOT / "html")
     app.config["DATABASE"] = str(
         database_path or os.environ.get("HOIKU_DATABASE", ROOT / "childcare.db")
     )
@@ -56,7 +139,159 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
     @app.get("/html/<path:filename>")
     def html_page(filename: str) -> Response:
+        if filename == "login.html":
+            return redirect("/login")
+        if filename == "user_home.html":
+            return redirect("/mypage")
         return send_from_directory(ROOT / "html", filename)
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login() -> Response | str:
+        if request.method == "GET":
+            if session.get("guardian_id") is not None:
+                return redirect("/mypage")
+            return render_template("login.html")
+
+        session.clear()
+        email = request.form.get("email", "").strip().casefold()
+        password = request.form.get("password", "")
+        guardian = get_database().execute(
+            "SELECT guardian_id, password_hash FROM guardians WHERE email = ?",
+            (email,),
+        ).fetchone()
+        password_hash = guardian["password_hash"] if guardian is not None else ""
+        password_matches = (
+            password_hash.startswith(("scrypt:", "pbkdf2:"))
+            and check_password_hash(password_hash, password)
+        )
+        if not password_matches:
+            flash("メールアドレスまたはパスワードが正しくありません。", "error")
+            return redirect("/login")
+
+        session.clear()
+        session["guardian_id"] = guardian["guardian_id"]
+        return redirect("/mypage")
+
+    @app.post("/register")
+    def register() -> Response:
+        name = request.form.get("name", "").strip()
+        phone = request.form.get("phone", "").strip()
+        email = request.form.get("email", "").strip().casefold()
+        password = request.form.get("password", "")
+        if not name or not phone or not email:
+            flash("氏名・電話番号・メールアドレスを入力してください。", "error")
+            return redirect("/login")
+        if len(password) < 8:
+            flash("パスワードは8文字以上で設定してください。", "error")
+            return redirect("/login")
+
+        try:
+            get_database().execute(
+                """
+                INSERT INTO guardians (name, phone, email, password_hash)
+                VALUES (?, ?, ?, ?)
+                """,
+                (name, phone, email, generate_password_hash(password)),
+            )
+        except sqlite3.IntegrityError:
+            flash("このメールアドレスはすでに登録されています。", "error")
+            return redirect("/login")
+
+        flash("登録しました。登録したメールアドレスとパスワードでログインしてください。", "success")
+        return redirect("/login")
+
+    @app.get("/mypage")
+    def mypage() -> Response:
+        guardian_id = session.get("guardian_id")
+        if not isinstance(guardian_id, int):
+            return redirect("/login")
+
+        connection = get_database()
+        guardian = connection.execute(
+            "SELECT name, priority_points FROM guardians WHERE guardian_id = ?",
+            (guardian_id,),
+        ).fetchone()
+        if guardian is None:
+            session.clear()
+            return redirect("/login")
+
+        rows = connection.execute(
+            """
+            SELECT r.reservation_id, r.care_date, r.start_hour, r.end_hour,
+                   r.status
+            FROM reservations r
+            JOIN children c ON c.child_id = r.child_id
+            WHERE c.guardian_id = ?
+              AND (r.status = 'confirmed'
+                   OR (r.status = 'held'
+                       AND r.hold_expires_at > datetime('now', 'localtime')))
+            ORDER BY r.care_date, r.start_hour
+            """,
+            (guardian_id,),
+        ).fetchall()
+        reservations = [
+            {
+                "id": row["reservation_id"],
+                "date": row["care_date"],
+                "time": f"{row['start_hour']}:00～{row['end_hour']}:00",
+                "child_count": 1,
+                "status": "仮押さえ中" if row["status"] == "held" else "予約済み",
+            }
+            for row in rows
+        ]
+        return render_template(
+            "user_home.html",
+            name=guardian["name"],
+            reservations=reservations,
+            points=guardian["priority_points"],
+        )
+
+    @app.get("/logout")
+    def logout() -> Response:
+        session.clear()
+        return redirect("/login")
+
+    @app.post("/cancel")
+    def cancel_reservation() -> Response:
+        guardian_id = session.get("guardian_id")
+        try:
+            reservation_id = int(request.form.get("reservation_id", ""))
+        except ValueError:
+            flash("予約番号が正しくありません。", "error")
+            return redirect("/mypage")
+
+        connection = get_database()
+        connection.execute("BEGIN IMMEDIATE")
+        reservation = connection.execute(
+            """
+            SELECT r.status
+            FROM reservations r
+            JOIN children c ON c.child_id = r.child_id
+            WHERE r.reservation_id = ? AND c.guardian_id = ?
+            """,
+            (reservation_id, guardian_id),
+        ).fetchone()
+        if reservation is None or reservation["status"] != "held":
+            connection.rollback()
+            flash("取り消せる仮押さえが見つかりません。", "error")
+            return redirect("/mypage")
+
+        connection.execute(
+            """
+            UPDATE reservations
+            SET status = 'cancelled', hold_expires_at = NULL,
+                updated_at = datetime('now', 'localtime')
+            WHERE reservation_id = ?
+            """,
+            (reservation_id,),
+        )
+        connection.execute(
+            "DELETE FROM reservation_hours WHERE reservation_id = ?",
+            (reservation_id,),
+        )
+        connection.commit()
+        flash("仮押さえを取り消しました。", "success")
+        return redirect("/mypage")
 
     @app.teardown_appcontext
     def close_database(_: BaseException | None = None) -> None:
