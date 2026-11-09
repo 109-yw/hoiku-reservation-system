@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>新規登録・ログイン</title>
+<title>ログイン</title>
 
 <style>
 body {
@@ -27,25 +27,6 @@ header {
     padding: 30px;
     border-radius: 12px;
     box-shadow: 0 4px 15px #0001;
-}
-
-.tabs {
-    display: flex;
-    margin-bottom: 25px;
-}
-
-.tab {
-    flex: 1;
-    padding: 15px;
-    border: none;
-    background: #e9f1f6;
-    cursor: pointer;
-    font-size: 16px;
-}
-
-.tab.active {
-    background: #78b5d6;
-    color: white;
 }
 
 h2 {
@@ -85,19 +66,33 @@ input {
     box-shadow: 0 5px 12px #0002;
 }
 
-.form {
-    display: none;
-}
-
-.form.active {
-    display: block;
-}
-
 .back {
     display: block;
     text-align: center;
     margin-top: 25px;
     color: #559ac2;
+}
+
+.message {
+    padding: 10px;
+    border-radius: 6px;
+    margin: 15px 0;
+}
+
+.message.error {
+    color: #8b0000;
+    background: #ffe8e8;
+}
+
+.message.success {
+    color: #155724;
+    background: #e6f4ea;
+}
+
+.register {
+    margin-top: 25px;
+    border-top: 1px solid #ddd;
+    padding-top: 15px;
 }
 </style>
 </head>
@@ -106,114 +101,58 @@ input {
 
 <header>
     <h1>一時保育予約システム</h1>
-    <p>新規登録・ログイン</p>
+    <p>ログイン</p>
 </header>
 
 <div class="container">
 
-    <div class="tabs">
-        <button class="tab active"
-                onclick="showForm('login')">
+    <h2>ログイン</h2>
+
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+    <p class="message {{ category }}" role="alert">{{ message }}</p>
+    {% endfor %}
+
+    <form action="/login" method="post">
+        <label for="email">メールアドレス</label>
+        <input type="email" id="email" name="email" autocomplete="email" required>
+
+        <label for="password">パスワード</label>
+        <input type="password" id="password"
+               name="password" autocomplete="current-password" required>
+
+        <button type="submit" class="submit">
             ログイン
         </button>
+    </form>
 
-        <button class="tab"
-                onclick="showForm('register')">
-            新規登録
-        </button>
-    </div>
-
-    <!-- ログインフォーム -->
-    <div id="login" class="form active">
-        <h2>ログイン</h2>
-
-        <form onsubmit="login(event)">
-            <label>メールアドレス</label>
-            <input type="email" required>
-
-            <label>パスワード</label>
-            <input type="password" required>
-
-            <button type="submit" class="submit">
-                ログイン
-            </button>
-        </form>
-    </div>
-
-    <!-- 新規登録フォーム -->
-    <div id="register" class="form">
+    <section class="register">
         <h2>新規登録</h2>
+        <form action="/register" method="post">
+            <label for="registerName">保護者氏名</label>
+            <input type="text" id="registerName" name="name"
+                   autocomplete="name" required>
 
-        <form onsubmit="register(event)">
-            <label>保護者氏名</label>
-            <input type="text" required>
+            <label for="phone">電話番号</label>
+            <input type="tel" id="phone" name="phone"
+                   autocomplete="tel" required>
 
-            <label>メールアドレス</label>
-            <input type="email" required>
+            <label for="registerEmail">メールアドレス</label>
+            <input type="email" id="registerEmail" name="email"
+                   autocomplete="email" required>
 
-            <label>パスワード</label>
-            <input type="password" id="password" required>
+            <label for="registerPassword">パスワード（8文字以上）</label>
+            <input type="password" id="registerPassword" name="password"
+                   minlength="8" autocomplete="new-password" required>
 
-            <label>パスワード（確認用）</label>
-            <input type="password" id="confirmPassword" required>
-
-            <button type="submit" class="submit">
-                新規登録する
-            </button>
+            <button type="submit" class="submit">新規登録</button>
         </form>
-    </div>
+    </section>
 
-    <a href="hoiku.html" class="back">
+    <a href="/" class="back">
         トップページに戻る
     </a>
 
 </div>
-
-<script>
-// フォームの切り替え
-function showForm(type) {
-    document.querySelectorAll(".form").forEach(form => {
-        form.classList.remove("active");
-    });
-
-    document.querySelectorAll(".tab").forEach(tab => {
-        tab.classList.remove("active");
-    });
-
-    document.getElementById(type).classList.add("active");
-
-    if (type === "login") {
-        document.querySelectorAll(".tab")[0].classList.add("active");
-    } else {
-        document.querySelectorAll(".tab")[1].classList.add("active");
-    }
-}
-
-// ログイン処理（仮）
-function login(event) {
-    event.preventDefault();
-
-    alert("ログイン機能は現在準備中です。");
-}
-
-// 新規登録処理（仮）
-function register(event) {
-    event.preventDefault();
-
-    const password =
-        document.getElementById("password").value;
-
-    const confirm =
-        document.getElementById("confirmPassword").value;
-
-    if (password !== confirm) {
-        alert("パスワードが一致しません。");
-        return;
-    }
-
-    alert("新規登録機能は現在準備中です。");
-}
-</script>
 
 </body>
 </html>

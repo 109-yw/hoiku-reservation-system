@@ -1,0 +1,163 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>利用者トップページ</title>
+
+<style>
+body {
+    font-family: sans-serif;
+    background: #f0f6fa;
+    margin: 0;
+}
+
+header {
+    background: #78b5d6;
+    color: white;
+    text-align: center;
+    padding: 25px;
+}
+
+.container {
+    max-width: 800px;
+    margin: 50px auto;
+    padding: 0 20px;
+}
+
+.welcome {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.menu {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+}
+
+.menu a {
+    background: white;
+    padding: 35px 15px;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px #0001;
+    text-align: center;
+    text-decoration: none;
+    color: #333;
+    transition: 0.2s;
+}
+
+.menu a:hover {
+    transform: translateY(-5px) scale(1.02);
+    box-shadow: 0 8px 20px #0002;
+}
+
+.menu h2 {
+    color: #559ac2;
+    font-size: 20px;
+}
+
+.menu p {
+    color: #666;
+    font-size: 14px;
+}
+
+.logout {
+    display: block;
+    width: 180px;
+    margin: 40px auto;
+    padding: 14px;
+    background: #78b5d6;
+    color: white;
+    border-radius: 8px;
+    text-align: center;
+    text-decoration: none;
+    transition: 0.2s;
+}
+
+.logout:hover {
+    background: #559ac2;
+    transform: translateY(-3px);
+}
+
+@media (max-width: 600px) {
+    .menu {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <h1>一時保育予約システム</h1>
+    <p>利用者トップページ</p>
+</header>
+
+<div class="container">
+
+<h2>マイページ</h2>
+<p>ようこそ、{{ name }} さん</p>
+
+<!-- 予約確認 -->
+<div class="card">
+    <h3>予約内容の確認</h3>
+
+    {% if reservations %}
+
+        {% for reservation in reservations %}
+
+        <div class="info">
+            <p>予約日：{{ reservation.date }}</p>
+            <p>利用時間：{{ reservation.time }}</p>
+            <p>お子様の人数：{{ reservation.child_count }}人</p>
+            <p>予約状況：{{ reservation.status }}</p>
+
+            {% if reservation.status == "仮押さえ中" %}
+            <form action="/cancel" method="POST"
+                  onsubmit="return confirmCancel()">
+
+                <input type="hidden"
+                       name="reservation_id"
+                       value="{{ reservation.id }}">
+
+                <button type="submit" class="menu cancel">
+                    この予約をキャンセル
+                </button>
+            </form>
+            {% endif %}
+        </div>
+
+    <div class="menu">
+
+        <a href="reservation.html">
+            <h2>新規予約</h2>
+            <p>カレンダーから予約する</p>
+        </a>
+
+        <a href="/html/reservation_check.html">
+            <h2>予約の確認</h2>
+            <p>現在の予約状況を確認する</p>
+        </a>
+
+        <a href="/html/reservation_cancel.html">
+            <h2>予約キャンセル</h2>
+            <p>予約済みの予定を取り消す</p>
+        </a>
+
+        <a href="/html/points.html">
+            <h2>優先ポイント確認</h2>
+            <p>現在の優先ポイントを確認する</p>
+        </a>
+
+    </div>
+
+    <a href="/" class="logout">ログアウト</a>
+
+</div>
+
+</body>
+</html>
+
