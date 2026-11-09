@@ -154,6 +154,16 @@ def import_csv_data(database_path: str | Path) -> None:
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN IMMEDIATE")
         try:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS csv_import_ids (
+                    source_table TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    PRIMARY KEY (source_table, source_id)
+                )
+                """
+            )
             guardian_ids: dict[str, int] = {}
             for row in rows_by_table["guardians"]:
                 email = row["email"].strip().casefold()
@@ -191,15 +201,34 @@ def import_csv_data(database_path: str | Path) -> None:
                     raise ValueError(
                         f"children.csv references unknown guardian_id: {row['guardian_id']}"
                     )
-                child = connection.execute(
+                imported_child = connection.execute(
                     """
-                    SELECT child_id FROM children
-                    WHERE guardian_id = ? AND name = ? AND birth_date = ?
+                    SELECT target_id FROM csv_import_ids
+                    WHERE source_table = 'children' AND source_id = ?
                     """,
-                    (guardian_id, row["name"], row["birth_date"]),
+                    (row["child_id"],),
                 ).fetchone()
+                child = None
+                if imported_child is not None:
+                    child = connection.execute(
+                        "SELECT child_id FROM children WHERE child_id = ?",
+                        (imported_child["target_id"],),
+                    ).fetchone()
+                if child is None:
+                    child = connection.execute(
+                        """
+                        SELECT child_id FROM children
+                        WHERE guardian_id = ? AND name = ? AND birth_date = ?
+                          AND child_id NOT IN (
+                              SELECT target_id FROM csv_import_ids
+                              WHERE source_table = 'children'
+                          )
+                        ORDER BY child_id
+                        LIMIT 1
+                        """,
+                        (guardian_id, row["name"], row["birth_date"]),
+                    ).fetchone()
                 values = (
-                    row["name_kana"] or None,
                     row["karte_status"],
                     row["karte_reviewed_at"] or None,
                     row["created_at"],
@@ -222,16 +251,37 @@ def import_csv_data(database_path: str | Path) -> None:
                             row["created_at"],
                         ),
                     )
+                    child_id = connection.execute(
+                        "SELECT last_insert_rowid()"
+                    ).fetchone()[0]
                 else:
                     connection.execute(
                         """
                         UPDATE children
-                        SET name_kana = ?, karte_status = ?,
+                        SET guardian_id = ?, name = ?, name_kana = ?, birth_date = ?,
+                            karte_status = ?,
                             karte_reviewed_at = ?, created_at = ?
                         WHERE child_id = ?
                         """,
-                        (*values, child["child_id"]),
+                        (
+                            guardian_id,
+                            row["name"],
+                            row["name_kana"] or None,
+                            row["birth_date"],
+                            *values,
+                            child["child_id"],
+                        ),
                     )
+                    child_id = child["child_id"]
+                connection.execute(
+                    """
+                    INSERT INTO csv_import_ids (source_table, source_id, target_id)
+                    VALUES ('children', ?, ?)
+                    ON CONFLICT(source_table, source_id)
+                    DO UPDATE SET target_id = excluded.target_id
+                    """,
+                    (row["child_id"], child_id),
+                )
 
             for row in rows_by_table["operating_days"]:
                 connection.execute(
@@ -271,15 +321,13 @@ def create_app(database_path: str | Path | None = None) -> Flask:
     def html_page(filename: str) -> Response:
         if filename == "login.html":
             return redirect("/login")
-        if filename == "user_home.html":
-            return redirect("/mypage")
         return send_from_directory(ROOT / "html", filename)
 
     @app.route("/login", methods=["GET", "POST"])
     def login() -> Response | str:
         if request.method == "GET":
             if session.get("guardian_id") is not None:
-                return redirect("/mypage")
+                return redirect("/html/user_home.html")
             return render_template("login.html")
 
         session.clear()
@@ -300,7 +348,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
         session.clear()
         session["guardian_id"] = guardian["guardian_id"]
-        return redirect("/mypage")
+        return redirect("/html/user_home.html")
 
     @app.post("/register")
     def register() -> Response:
@@ -331,6 +379,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         return redirect("/login")
 
     @app.get("/mypage")
+    @app.get("/html/user_home.html")
     def mypage() -> Response:
         guardian_id = session.get("guardian_id")
         if not isinstance(guardian_id, int):
@@ -345,9 +394,19 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             session.clear()
             return redirect("/login")
 
+        children = connection.execute(
+            """
+            SELECT child_id, name, birth_date, karte_status
+            FROM children
+            WHERE guardian_id = ?
+            ORDER BY child_id
+            """,
+            (guardian_id,),
+        ).fetchall()
         rows = connection.execute(
             """
-            SELECT r.reservation_id, r.care_date, r.start_hour, r.end_hour,
+            SELECT r.reservation_id, c.name AS child_name,
+                   r.care_date, r.start_hour, r.end_hour,
                    r.status
             FROM reservations r
             JOIN children c ON c.child_id = r.child_id
@@ -364,7 +423,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 "id": row["reservation_id"],
                 "date": row["care_date"],
                 "time": f"{row['start_hour']}:00～{row['end_hour']}:00",
-                "child_count": 1,
+                "child_name": row["child_name"],
                 "status": "仮押さえ中" if row["status"] == "held" else "予約済み",
             }
             for row in rows
@@ -372,6 +431,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         return render_template(
             "user_home.html",
             name=guardian["name"],
+            children=children,
             reservations=reservations,
             points=guardian["priority_points"],
         )

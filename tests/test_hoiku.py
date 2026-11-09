@@ -1,5 +1,4 @@
 from contextlib import closing
-from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -84,6 +83,27 @@ class ReservationApiTests(unittest.TestCase):
                 ("hogo2@example.com", "鈴木 愛"),
             ],
         )
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            siblings = connection.execute(
+                """
+                SELECT c.name, c.guardian_id, g.email, g.guardian_id
+                FROM children c
+                JOIN guardians g ON g.guardian_id = c.guardian_id
+                WHERE g.email = 'guardian03@example.com'
+                ORDER BY c.name
+                """
+            ).fetchall()
+        self.assertEqual(
+            [row[0] for row in siblings], ["高橋 湊", "高橋 碧人"]
+        )
+        self.assertEqual(len({row[1] for row in siblings}), 1)
+        self.assertEqual({row[2] for row in siblings}, {"guardian03@example.com"})
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = siblings[0][3]
+        mypage = self.client.get("/mypage")
+        self.assertIn("高橋 湊".encode(), mypage.data)
+        self.assertIn("高橋 碧人".encode(), mypage.data)
+        mypage.close()
 
     def test_register_login_and_logout(self) -> None:
         login_page = self.client.get("/login")
@@ -93,7 +113,7 @@ class ReservationApiTests(unittest.TestCase):
         login_page.close()
         self.assertEqual(
             self.client.get("/html/user_home.html").headers["Location"],
-            "/mypage",
+            "/login",
         )
 
         registered = self.client.post(
@@ -115,9 +135,9 @@ class ReservationApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(login.status_code, 302)
-        self.assertEqual(login.headers["Location"], "/mypage")
+        self.assertEqual(login.headers["Location"], "/html/user_home.html")
 
-        mypage = self.client.get("/mypage")
+        mypage = self.client.get("/html/user_home.html")
         self.assertEqual(mypage.status_code, 200)
         self.assertIn("テスト保護者".encode(), mypage.data)
         self.assertIn(b"0 \xe3\x83\x9d\xe3\x82\xa4\xe3\x83\xb3\xe3\x83\x88", mypage.data)
@@ -146,16 +166,20 @@ class ReservationApiTests(unittest.TestCase):
             ("hogo1@example.com", "satou", "佐藤 敏夫", "佐藤 太郎"),
             ("hogo2@example.com", "suzuki", "鈴木 一郎", "鈴木 愛"),
         )
-        for email, password, guardian_name, _ in accounts:
+        for email, password, guardian_name, child_name in accounts:
             with self.subTest(email=email):
                 response = self.client.post(
                     "/login",
                     data={"email": email, "password": password},
                 )
-                self.assertEqual(response.headers["Location"], "/mypage")
-                mypage = self.client.get("/mypage")
+                self.assertEqual(
+                    response.headers["Location"], "/html/user_home.html"
+                )
+                mypage = self.client.get("/html/user_home.html")
                 self.assertIn(guardian_name.encode(), mypage.data)
-                self.assertIn(guardian_name.encode(), mypage.data)
+                self.assertIn(child_name.encode(), mypage.data)
+                other_child = "鈴木 愛" if email == "hogo1@example.com" else "佐藤 太郎"
+                self.assertNotIn(other_child.encode(), mypage.data)
                 mypage.close()
                 self.client.get("/logout")
 

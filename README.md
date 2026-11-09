@@ -2,7 +2,7 @@
 
 ## Python API（試作）
 
-Python側ではFlaskとSQLiteを使い、予約枠の空き状況確認、仮押さえ、仮押さえの確定・取消を提供します。初回起動時に `SQL/childcare_v2 (1).sql` からデータベースを作成し、`SQL/guardians.csv`、`SQL/children.csv`、`SQL/operating_days.csv` のデータを追加・同期します。既存の保護者・児童IDと重複する場合は、保護者メールアドレスおよび児童情報で照合して既存の予約参照を保持します。CSVの処理は起動時に繰り返しても同じデータが重複しません。
+Python側ではFlaskとSQLiteを使い、予約枠の空き状況確認、仮押さえ、仮押さえの確定・取消を提供します。初回起動時に `SQL/childcare_v2 (1).sql` からデータベースを作成し、`SQL/guardians.csv`、`SQL/children.csv`、`SQL/operating_days.csv` のデータを追加・同期します。CSVの保護者IDはメールアドレスからDB上の保護者IDに対応付け、CSVの児童IDも内部の対応表でDB上の児童IDに結び付けます。児童の親はCSVの `guardian_id` に従うため、同じ保護者IDの複数児童は同一世帯の兄弟姉妹として扱われ、マイページに全員表示されます。CSVの処理は起動時に繰り返しても同じデータが重複しません。
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -11,7 +11,7 @@ python hoiku.py
 
 サーバーは `http://127.0.0.1:5000` で起動します。DBの保存先は `HOIKU_DATABASE` 環境変数で変更できます。
 トップページと予約カレンダーも同じサーバーから配信されます。`http://127.0.0.1:5000/` を開いてください。
-ログイン画面では保護者アカウントを新規登録でき、ログインするとマイページに移動します。登録時のパスワードはハッシュ化して保存します。セッション署名鍵は `HOIKU_SECRET_KEY` 環境変数で設定できます。
+ログイン画面 (`/login` または `/html/login.html`) では保護者アカウントを新規登録でき、ログインすると `html/user_home.html` のユーザー別マイページ (`/html/user_home.html`) に移動します。ログイン中の保護者IDを使って、その世帯の児童・予約・ポイントを表示します。登録時のパスワードはハッシュ化して保存します。セッション署名鍵は `HOIKU_SECRET_KEY` 環境変数で設定できます。
 
 ローカルテスト用アカウントは起動時に用意されます（パスワードはハッシュ保存）。
 
