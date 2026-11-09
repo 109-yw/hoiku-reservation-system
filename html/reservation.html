@@ -178,11 +178,11 @@ input, select {
 <div class="form-area" id="formArea">
 
         <h2 id="selectedDate"></h2>
-        <p>児童カルテIDと利用時間を選択してください。</p>
+        <p>児童IDと利用時間を選択してください。</p>
 
         <form id="reservationForm">
 
-            <label for="childId">児童カルテID</label>
+            <label for="childId">児童ID</label>
             <input id="childId" type="number" min="1" step="1" required>
             <small>ログイン・児童一覧機能が未実装のため、承認済み児童のIDを入力してください。</small>
 
@@ -194,7 +194,7 @@ input, select {
                 <option value="full_day">9:00～17:00（一日）</option>
             </select>
 
-            <button type="submit" class="reserve">仮押さえを作成</button>
+            <button type="submit" class="reserve">予約確定</button>
 
         </form>
         <p id="reservationMessage" class="message" aria-live="polite"></p>
