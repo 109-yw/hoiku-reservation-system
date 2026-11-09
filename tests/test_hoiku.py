@@ -1,5 +1,7 @@
 from contextlib import closing
+import csv
 import sqlite3
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,9 +10,20 @@ from hoiku import create_app
 
 
 class ReservationApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.base_dir = tempfile.TemporaryDirectory()
+        cls.base_database = Path(cls.base_dir.name) / "base.db"
+        create_app(cls.base_database)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.base_dir.cleanup()
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         database_path = Path(self.temp_dir.name) / "test.db"
+        shutil.copy2(self.base_database, database_path)
         self.app = create_app(database_path)
         self.client = self.app.test_client()
         with closing(sqlite3.connect(database_path)) as connection:
@@ -160,17 +173,36 @@ class ReservationApiTests(unittest.TestCase):
         self.assertIn("正しくありません".encode(), response.data)
         response.close()
 
-    def test_csv_password_placeholders_do_not_allow_login(self) -> None:
+    def test_csv_guardian_password_is_hashed_and_login_works(self) -> None:
+        csv_path = Path(__file__).resolve().parents[1] / "SQL" / "guardians.csv"
+        with csv_path.open(encoding="utf-8-sig", newline="") as source:
+            csv_guardian = next(
+                row
+                for row in csv.DictReader(source)
+                if row["email"] == "guardian01@example.com"
+            )
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            stored_hash = connection.execute(
+                "SELECT password_hash FROM guardians WHERE email = ?",
+                (csv_guardian["email"],),
+            ).fetchone()[0]
+        self.assertNotEqual(stored_hash, csv_guardian["password"])
+        self.assertTrue(stored_hash.startswith(("scrypt:", "pbkdf2:")))
+
         response = self.client.post(
             "/login",
             data={
-                "email": "guardian01@example.com",
-                "password": "any-password",
+                "email": csv_guardian["email"],
+                "password": csv_guardian["password"],
             },
-            follow_redirects=True,
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("正しくありません".encode(), response.data)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/html/user_home.html")
+        mypage = self.client.get("/html/user_home.html")
+        self.assertEqual(mypage.status_code, 200)
+        self.assertIn("佐藤 花子".encode(), mypage.data)
+        mypage.close()
         response.close()
 
     def test_registration_rejects_duplicate_email(self) -> None:

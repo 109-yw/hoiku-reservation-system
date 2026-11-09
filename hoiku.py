@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import os
 import secrets
@@ -193,6 +194,113 @@ def initialize_database(database_path: str | Path) -> None:
         raise
 
 
+def sync_guardian_passwords(database_path: str | Path) -> None:
+    csv_path = ROOT / "SQL" / "guardians.csv"
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Required CSV file not found: {csv_path}")
+
+    csv_contents = csv_path.read_bytes()
+    csv_fingerprint = hashlib.sha256(csv_contents).hexdigest()
+
+    with closing(sqlite3.connect(database_path, timeout=10)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            previous_fingerprint = connection.execute(
+                "SELECT value FROM app_metadata WHERE key = 'guardians_csv_sha256'"
+            ).fetchone()
+            if previous_fingerprint is not None and previous_fingerprint[0] == csv_fingerprint:
+                connection.commit()
+                return
+
+            reader = csv.DictReader(
+                io.StringIO(csv_contents.decode("utf-8-sig"), newline="")
+            )
+            required_columns = {"guardian_id", "email", "password"}
+            if reader.fieldnames is None or not required_columns.issubset(
+                reader.fieldnames
+            ):
+                raise ValueError(f"CSV has missing password columns: {csv_path}")
+
+            updates: list[tuple[int, str, str, str]] = []
+            seen_ids: set[int] = set()
+            seen_emails: set[str] = set()
+            for row in reader:
+                try:
+                    guardian_id = int(row["guardian_id"])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        "guardians.csv contains an invalid guardian_id"
+                    ) from error
+                email = (row["email"] or "").strip().casefold()
+                password = row["password"] or ""
+                if not email or not password:
+                    raise ValueError(
+                        "guardians.csv contains an empty email or password"
+                    )
+                if guardian_id in seen_ids or email in seen_emails:
+                    raise ValueError("guardians.csv contains duplicate IDs or emails")
+                seen_ids.add(guardian_id)
+                seen_emails.add(email)
+
+                if password.startswith(("scrypt:", "pbkdf2:")):
+                    password_hash = password
+                else:
+                    password_hash = generate_password_hash(password)
+                updates.append((guardian_id, email, password, password_hash))
+
+            for guardian_id, email, password, password_hash in updates:
+                guardian = connection.execute(
+                    """
+                    SELECT password_hash FROM guardians
+                    WHERE guardian_id = ? AND email = ?
+                    """,
+                    (guardian_id, email),
+                ).fetchone()
+                if guardian is None:
+                    raise ValueError(
+                        "guardians.csv ID/email does not match the database "
+                        f"for guardian_id {guardian_id}"
+                    )
+
+                current_hash = guardian[0]
+                if current_hash == password_hash:
+                    continue
+                if (
+                    not password.startswith(("scrypt:", "pbkdf2:"))
+                    and current_hash.startswith(("scrypt:", "pbkdf2:"))
+                    and check_password_hash(current_hash, password)
+                ):
+                    continue
+                connection.execute(
+                    """
+                    UPDATE guardians SET password_hash = ?
+                    WHERE guardian_id = ? AND email = ?
+                    """,
+                    (password_hash, guardian_id, email),
+                )
+            connection.execute(
+                """
+                INSERT INTO app_metadata (key, value)
+                VALUES ('guardians_csv_sha256', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (csv_fingerprint,),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
 def create_app(database_path: str | Path | None = None) -> Flask:
     app = Flask(__name__)
     app.secret_key = os.environ.get("HOIKU_SECRET_KEY") or secrets.token_hex(32)
@@ -205,6 +313,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         database_path or os.environ.get("HOIKU_DATABASE", ROOT / "childcare.db")
     )
     initialize_database(app.config["DATABASE"])
+    sync_guardian_passwords(app.config["DATABASE"])
 
     @app.get("/")
     def home() -> Response:
