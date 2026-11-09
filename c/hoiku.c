@@ -200,6 +200,7 @@ int hoiku_reserve(sqlite3 *db, sqlite3_int64 child_id, const char *care_date,
     /* 年齢区分ごとの1時間料金と、確認対象にする時間。 */
     int hourly_fee;
     int hour;
+    int is_open;
     /* 1ならキャンセル待ち、0なら通常の仮押さえを作る。 */
     int waitlisted = 0;
     int result;
@@ -288,27 +289,26 @@ int hoiku_reserve(sqlite3 *db, sqlite3_int64 child_id, const char *care_date,
     statement = NULL;
 
     /*
-     * 予約日が開所日か確認し、その日の上限値を取得する。
-     * staff_countは保育士のリソース上限、max_childrenは児童人数の上限。
+     * operating_days.csvの内容を取り込んだoperating_daysテーブルで、
+     * 予約日が登録されているか、またis_openが1（開所）かを確認する。
+     * このテーブルには日付と開閉所だけがあるため、人数・保育士の上限は
+     * 後ほどsettingsテーブルから別に読み込む。
      */
     if (prepare_sql(db,
-                    "SELECT staff_count, max_children FROM operating_days "
-                    "WHERE care_date = ? AND is_open = 1",
+                    "SELECT is_open FROM operating_days WHERE care_date = ?",
                     &statement, error, error_size) != SQLITE_OK) {
         goto failed;
     }
     sqlite3_bind_text(statement, 1, care_date, -1, SQLITE_TRANSIENT);
     result = sqlite3_step(statement);
-    /* SELECTが1行見つかった場合、列0と列1から上限値を読み取る。 */
     if (result == SQLITE_ROW) {
-        configured_staff_count = sqlite3_column_double(statement, 0);
-        configured_max_children = sqlite3_column_double(statement, 1);
+        is_open = sqlite3_column_int(statement, 0);
     }
     sqlite3_finalize(statement);
     statement = NULL;
-    /* SQLITE_DONEは対象日が存在しない、または休所日であることを表す。 */
+    /* CSVに日付がない場合は、開所日として扱わず予約を受け付けない。 */
     if (result == SQLITE_DONE) {
-        set_error(error, error_size, "指定日は開所日ではありません。");
+        set_error(error, error_size, "指定日の開所情報がありません。");
         goto failed;
     }
     if (result != SQLITE_ROW) {
@@ -316,8 +316,20 @@ int hoiku_reserve(sqlite3 *db, sqlite3_int64 child_id, const char *care_date,
                   sqlite3_errmsg(db));
         goto failed;
     }
-    if (configured_staff_count < 0 || configured_max_children < 0) {
-        set_error(error, error_size, "開所日の予約上限が不正です。");
+    /* operating_days.csvのis_openが0なら、その日は休業日として拒否する。 */
+    if (is_open != 1) {
+        set_error(error, error_size, "指定日は休業日です。");
+        goto failed;
+    }
+
+    /*
+     * childcare_v2.sqlでは定員がsettingsテーブルに保存される。
+     * 開所日CSVは日付と開閉所のみなので、予約枠の上限はここから取得する。
+     */
+    if (read_setting(db, "staff_count", &configured_staff_count, error,
+                     error_size) != SQLITE_OK ||
+        read_setting(db, "max_children", &configured_max_children, error,
+                     error_size) != SQLITE_OK) {
         goto failed;
     }
     /*
@@ -325,6 +337,10 @@ int hoiku_reserve(sqlite3 *db, sqlite3_int64 child_id, const char *care_date,
      * 保育リソースは5人分までに制限する。施設側の値が小さい場合は
      * その値を使うので、実際の上限は「設定値と5の小さい方」になる。
      */
+    if (configured_staff_count < 0 || configured_max_children < 0) {
+        set_error(error, error_size, "予約上限の設定値が不正です。");
+        goto failed;
+    }
     if (configured_staff_count > 5.0) {
         configured_staff_count = 5.0;
     }
