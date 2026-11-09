@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, g, jsonify, request
+from flask import Flask, Response, g, jsonify, redirect, request, send_from_directory
 
 
 ROOT = Path(__file__).resolve().parent
@@ -49,6 +49,14 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         database_path or os.environ.get("HOIKU_DATABASE", ROOT / "childcare.db")
     )
     initialize_database(app.config["DATABASE"])
+
+    @app.get("/")
+    def home() -> Response:
+        return redirect("/html/hoiku.html")
+
+    @app.get("/html/<path:filename>")
+    def html_page(filename: str) -> Response:
+        return send_from_directory(ROOT / "html", filename)
 
     @app.teardown_appcontext
     def close_database(_: BaseException | None = None) -> None:
@@ -97,6 +105,53 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             care_date=care_date,
             slots=[dict(row) for row in rows],
         )
+
+    @app.get("/api/availability/month")
+    def monthly_availability() -> Response | tuple[Response, int]:
+        try:
+            year = int(request.args.get("year", ""))
+            month = int(request.args.get("month", ""))
+            month_start = date(year, month, 1)
+            if month == 12:
+                next_month = date(year + 1, 1, 1)
+            else:
+                next_month = date(year, month + 1, 1)
+        except ValueError:
+            return error_response("year と month は有効な年月で指定してください。", 400)
+
+        rows = get_database().execute(
+            """
+            SELECT od.care_date, od.is_open,
+                   MIN(v.children_remaining) AS min_remaining,
+                   MAX(v.children_remaining) AS max_remaining
+            FROM operating_days od
+            LEFT JOIN v_hourly_load v ON v.care_date = od.care_date
+            WHERE od.care_date >= ? AND od.care_date < ?
+            GROUP BY od.care_date, od.is_open
+            ORDER BY od.care_date
+            """,
+            (month_start.isoformat(), next_month.isoformat()),
+        ).fetchall()
+
+        days = []
+        for row in rows:
+            if row["is_open"] != 1:
+                status = "closed"
+            elif row["max_remaining"] <= 0:
+                status = "full"
+            elif row["min_remaining"] <= 3:
+                status = "few"
+            else:
+                status = "open"
+            days.append(
+                {
+                    "care_date": row["care_date"],
+                    "status": status,
+                    "remaining_min": row["min_remaining"],
+                    "remaining_max": row["max_remaining"],
+                }
+            )
+        return jsonify(year=year, month=month, days=days)
 
     @app.post("/api/holds")
     def create_hold() -> tuple[Response, int]:

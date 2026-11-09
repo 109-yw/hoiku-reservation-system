@@ -24,6 +24,29 @@ class ReservationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json["slots"]), 8)
 
+    def test_calendar_page_is_served_by_the_api_server(self) -> None:
+        self.assertEqual(self.client.get("/").status_code, 302)
+        response = self.client.get("/html/reservation.html")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"/api/availability/month", response.data)
+        response.close()
+
+    def test_monthly_availability_contains_operating_days(self) -> None:
+        response = self.client.get("/api/availability/month?year=2026&month=11")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [day["care_date"] for day in response.json["days"]],
+            ["2026-11-10", "2026-11-11"],
+        )
+        self.assertEqual(response.json["days"][0]["status"], "open")
+        self.assertEqual(response.json["days"][0]["remaining_min"], 14)
+
+    def test_monthly_availability_rejects_invalid_month(self) -> None:
+        response = self.client.get("/api/availability/month?year=2026&month=13")
+
+        self.assertEqual(response.status_code, 400)
+
     def test_create_and_confirm_hold(self) -> None:
         response = self.client.post(
             "/api/holds",

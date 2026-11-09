@@ -98,10 +98,20 @@ button:hover {
 .open { color: green; }
 .few { color: orange; }
 .full { color: red; }
+.closed { color: #777; }
 
 .legend {
     text-align: center;
     margin: 20px 0;
+}
+
+.message {
+    min-height: 1.5em;
+    color: #333;
+}
+
+.message.error {
+    color: #b00020;
 }
 
 .form-area {
@@ -152,48 +162,44 @@ input, select {
         <button onclick="changeMonth(-1)">◀ 前月</button>
         <h2 id="monthTitle"></h2>
         <button onclick="changeMonth(1)">翌月 ▶</button>
-    </div>
+        </div>
 
-    <div class="calendar" id="calendar"></div>
+        <p id="calendarMessage" class="message" aria-live="polite"></p>
+        <div class="calendar" id="calendar"></div>
 
-    <div class="legend">
-        <span class="open">○ 空きあり</span>　
-        <span class="few">△ 残りわずか</span>　
-        <span class="full">× 満員</span>
-    </div>
+        <div class="legend">
+            <span class="open">○ 空きあり</span>　
+            <span class="few">△ 残りわずか</span>　
+            <span class="full">× 満員</span>　
+            <span class="closed">休 開所情報なし・休所</span>
+        </div>
 
     
 <div class="form-area" id="formArea">
 
-    <h2 id="selectedDate"></h2>
-    <p>利用人数と利用時間を選択してください。</p>
+        <h2 id="selectedDate"></h2>
+        <p>児童カルテIDと利用時間を選択してください。</p>
 
-    <form id="reservationForm">
+        <form id="reservationForm">
 
-        <!-- 子どもの人数 -->
-        <label for="childCount">お子様の人数</label>
-        <select id="childCount" required>
-            <option value="">選択してください</option>
-            <option value="1">1人</option>
-            <option value="2">2人</option>
-            <option value="3">3人</option>
-            <option value="4">4人</option>
-        </select>
+            <label for="childId">児童カルテID</label>
+            <input id="childId" type="number" min="1" step="1" required>
+            <small>ログイン・児童一覧機能が未実装のため、承認済み児童のIDを入力してください。</small>
 
-        <!-- 利用時間 -->
-        <label for="time">利用時間</label>
-        <select id="time" required>
-            <option value="">選択してください</option>
-            <option value="9:00～13:00">9:00～13:00（午前）</option>
-            <option value="13:00～17:00">13:00～17:00（午後）</option>
-            <option value="9:00～17:00">9:00～17:00（一日）</option>
-        </select>
+            <label for="time">利用時間</label>
+            <select id="time" required>
+                <option value="">選択してください</option>
+                <option value="morning">9:00～13:00（午前）</option>
+                <option value="afternoon">13:00～17:00（午後）</option>
+                <option value="full_day">9:00～17:00（一日）</option>
+            </select>
 
-        <button type="submit" class="reserve">
-            予約内容を確認
-        </button>
+            <button type="submit" class="reserve">仮押さえを作成</button>
 
-    </form>
+        </form>
+        <p id="reservationMessage" class="message" aria-live="polite"></p>
+        <button id="confirmButton" type="button" hidden>予約を確定</button>
+        <button id="cancelButton" type="button" hidden>仮押さえを取消</button>
 </div>
 
 
@@ -210,21 +216,24 @@ today.setHours(0, 0, 0, 0);
 let currentYear = today.getFullYear();
 let currentMonth = today.getMonth();
 let selectedDate = null;
-
-// 仮の空き状況
-function getStatus(day) {
-    if (day % 9 === 0) return "full";
-    if (day % 5 === 0) return "few";
-    return "open";
-}
+let currentHoldId = null;
+let reservationConfirmed = false;
+let monthDays = new Map();
+let calendarRequestId = 0;
 
 // カレンダーを表示
-function renderCalendar() {
+async function renderCalendar() {
+    const requestId = ++calendarRequestId;
+    const year = currentYear;
+    const month = currentMonth;
     const calendar = document.getElementById("calendar");
     calendar.innerHTML = "";
 
     document.getElementById("monthTitle").textContent =
-        `${currentYear}年${currentMonth + 1}月`;
+        `${year}年${month + 1}月`;
+    const calendarMessage = document.getElementById("calendarMessage");
+    calendarMessage.textContent = "空き状況を読み込んでいます。";
+    calendarMessage.classList.remove("error");
 
     const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
 
@@ -235,16 +244,41 @@ function renderCalendar() {
         calendar.appendChild(div);
     });
 
-    const firstDay = new Date(currentYear, currentMonth, 1).getDay();
-    const lastDay = new Date(currentYear, currentMonth + 1, 0).getDate();
+    const firstDay = new Date(year, month, 1).getDay();
 
     for (let i = 0; i < firstDay; i++) {
         calendar.appendChild(document.createElement("div"));
     }
 
+    try {
+        const response = await fetch(
+            `/api/availability/month?year=${year}&month=${month + 1}`
+        );
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || "空き状況を取得できませんでした。");
+        }
+        if (requestId !== calendarRequestId) return;
+        monthDays = new Map(result.days.map(day => [day.care_date, day]));
+        calendarMessage.textContent = "";
+    } catch (error) {
+        if (requestId !== calendarRequestId) return;
+        monthDays = new Map();
+        calendarMessage.textContent =
+            error.message || "空き状況を取得できませんでした。";
+        calendarMessage.classList.add("error");
+    }
+
+    const lastDay = new Date(year, month + 1, 0).getDate();
     for (let day = 1; day <= lastDay; day++) {
-        const date = new Date(currentYear, currentMonth, day);
-        const status = getStatus(day);
+        const date = new Date(year, month, day);
+        const dateKey = [
+            year,
+            String(month + 1).padStart(2, "0"),
+            String(day).padStart(2, "0")
+        ].join("-");
+        const dayInfo = monthDays.get(dateKey);
+        const status = dayInfo ? dayInfo.status : "closed";
 
         const btn = document.createElement("button");
         btn.className = "day";
@@ -255,17 +289,18 @@ function renderCalendar() {
 
         const mark = document.createElement("span");
         mark.className = "status " + status;
-        mark.textContent =
-            status === "full" ? "×" :
-            status === "few" ? "△" : "○";
+        mark.textContent = status === "full" ? "×" :
+            status === "few" ? "△" :
+            status === "open" ? "○" : "休";
 
         btn.appendChild(number);
         btn.appendChild(mark);
 
-        if (date < today || status === "full") {
+        if (date < today || !dayInfo || status === "closed" || status === "full"
+                || currentHoldId !== null) {
             btn.disabled = true;
         } else {
-            btn.onclick = () => selectDate(day, btn);
+            btn.onclick = () => selectDate(dateKey, btn);
         }
 
         calendar.appendChild(btn);
@@ -274,48 +309,107 @@ function renderCalendar() {
 
 // 月を切り替える
 function changeMonth(value) {
+    if (currentHoldId !== null) return;
     const date = new Date(currentYear, currentMonth + value, 1);
     currentYear = date.getFullYear();
     currentMonth = date.getMonth();
 
     selectedDate = null;
     document.getElementById("formArea").style.display = "none";
+    document.getElementById("reservationForm").reset();
+    document.getElementById("reservationMessage").textContent = "";
 
     renderCalendar();
 }
 
 // 日付を選択
-function selectDate(day, button) {
+function selectDate(dateKey, button) {
     document.querySelectorAll(".day").forEach(btn => {
         btn.classList.remove("selected");
     });
 
     button.classList.add("selected");
-
-    selectedDate =
-        `${currentYear}年${currentMonth + 1}月${day}日`;
+    selectedDate = dateKey;
+    currentHoldId = null;
+    reservationConfirmed = false;
+    document.getElementById("reservationForm").reset();
+    document.getElementById("reservationMessage").textContent = "";
+    document.getElementById("confirmButton").hidden = true;
+    document.getElementById("cancelButton").hidden = true;
 
     document.getElementById("selectedDate").textContent =
-        selectedDate + " の予約";
+        new Date(`${dateKey}T00:00:00`).toLocaleDateString("ja-JP") + " の予約";
 
     document.getElementById("formArea").style.display = "block";
 }
 
-// 予約内容を確認
-document.getElementById("reservationForm").onsubmit = function(e) {
+document.getElementById("reservationForm").onsubmit = async function(e) {
     e.preventDefault();
+    if (!selectedDate || currentHoldId !== null || reservationConfirmed) return;
 
-    const name = document.getElementById("childName").value;
-    const time = document.getElementById("time").value;
+    const message = document.getElementById("reservationMessage");
+    message.classList.remove("error");
+    message.textContent = "仮押さえを作成しています。";
 
-    alert(
-        "【予約内容】\n" +
-        "利用日：" + selectedDate + "\n" +
-        "お子様：" + name + "\n" +
-        "利用時間：" + time + "\n\n" +
-        "※現在は試作品のため予約は保存されません。"
-    );
+    try {
+        const response = await fetch("/api/holds", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                child_id: Number(document.getElementById("childId").value),
+                care_date: selectedDate,
+                course: document.getElementById("time").value
+            })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || "仮押さえを作成できませんでした。");
+        }
+        currentHoldId = result.reservation_id;
+        message.textContent =
+            `仮押さえしました。料金: ${result.fee_yen.toLocaleString()}円。内容を確認して確定してください。`;
+        document.getElementById("confirmButton").hidden = false;
+        document.getElementById("cancelButton").hidden = false;
+        renderCalendar();
+    } catch (error) {
+        message.textContent =
+            error.message || "仮押さえを作成できませんでした。";
+        message.classList.add("error");
+    }
 };
+
+document.getElementById("confirmButton").onclick = async function() {
+    if (currentHoldId === null) return;
+    await updateHold(`/api/holds/${currentHoldId}/confirm`, "POST", "予約を確定しました。");
+};
+
+document.getElementById("cancelButton").onclick = async function() {
+    if (currentHoldId === null) return;
+    await updateHold(`/api/holds/${currentHoldId}`, "DELETE", "仮押さえを取り消しました。");
+};
+
+async function updateHold(url, method, successMessage) {
+    const message = document.getElementById("reservationMessage");
+    message.classList.remove("error");
+    message.textContent = "予約情報を更新しています。";
+
+    try {
+        const response = await fetch(url, {method});
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || "予約情報を更新できませんでした。");
+        }
+        message.textContent = successMessage;
+        reservationConfirmed = method === "POST";
+        currentHoldId = null;
+        document.getElementById("confirmButton").hidden = true;
+        document.getElementById("cancelButton").hidden = true;
+        renderCalendar();
+    } catch (error) {
+        message.textContent = error.message || "予約情報を更新できませんでした。";
+        message.classList.add("error");
+    }
+}
 
 renderCalendar();
 </script>

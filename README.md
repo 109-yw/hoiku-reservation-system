@@ -10,14 +10,18 @@ python hoiku.py
 ```
 
 サーバーは `http://127.0.0.1:5000` で起動します。DBの保存先は `HOIKU_DATABASE` 環境変数で変更できます。
+トップページと予約カレンダーも同じサーバーから配信されます。`http://127.0.0.1:5000/` を開いてください。
 
 ### API
 
 - `GET /api/health` — 起動確認
 - `GET /api/availability?care_date=YYYY-MM-DD` — 1時間ごとの空き状況
+- `GET /api/availability/month?year=YYYY&month=M` — 月内の開所日と空き状況
 - `POST /api/holds` — 仮押さえを作成
 - `POST /api/holds/<reservation_id>/confirm` — 仮押さえを確定
 - `DELETE /api/holds/<reservation_id>` — 仮押さえを取り消す
+
+予約カレンダーは月別APIから開所日・空き状況を取得し、日付選択後に仮押さえと確定を行います。ログインと児童一覧は未実装のため、予約時に承認済み児童の `child_id` を入力してください。
 
 仮押さえのJSON例:
 
