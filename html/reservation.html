@@ -132,6 +132,57 @@ input, select {
     box-sizing: border-box;
 }
 
+#childrenList {
+    border: 1px solid #c5d3dd;
+    border-radius: 8px;
+    padding: 12px 16px;
+}
+
+.child-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: fit-content;
+    margin: 8px 0;
+    cursor: pointer;
+}
+
+.child-checkbox {
+    appearance: none;
+    flex: 0 0 22px;
+    position: relative;
+    width: 22px;
+    height: 22px;
+    margin: 0;
+    padding: 0;
+    border: 2px solid #526b7c;
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+}
+
+.child-checkbox:checked {
+    border-color: #256a9a;
+    background-color: #256a9a;
+}
+
+.child-checkbox:checked::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 1px;
+    width: 5px;
+    height: 11px;
+    border: solid white;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.child-checkbox:focus-visible {
+    outline: 3px solid #91c9eb;
+    outline-offset: 2px;
+}
+
 .reserve {
     width: 100%;
     margin-top: 25px;
@@ -361,11 +412,12 @@ async function loadChildren() {
         }
         result.children.forEach(child => {
             const label = document.createElement("label");
+            label.className = "child-option";
             const checkbox = document.createElement("input");
             checkbox.type = "checkbox";
             checkbox.name = "childId";
             checkbox.value = child.child_id;
-            checkbox.required = true;
+            checkbox.className = "child-checkbox";
             label.append(checkbox, document.createTextNode(` ${child.name}`));
             list.appendChild(label);
         });
