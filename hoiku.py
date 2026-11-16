@@ -6,7 +6,9 @@ import io
 import os
 import secrets
 import sqlite3
+import subprocess
 import tempfile
+import time
 import zipfile
 from contextlib import closing
 from datetime import date, datetime, timedelta
@@ -361,6 +363,22 @@ def sync_child_karte_statuses(database_path: str | Path) -> None:
             raise
 
 
+def initialize_reservation_attempts(database_path: str | Path) -> None:
+    with closing(sqlite3.connect(database_path, timeout=10)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reservation_attempts (
+                reservation_id INTEGER PRIMARY KEY,
+                attempted_at_ms INTEGER NOT NULL,
+                FOREIGN KEY (reservation_id)
+                    REFERENCES reservations(reservation_id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.commit()
+
+
 def create_app(database_path: str | Path | None = None) -> Flask:
     app = Flask(__name__)
     app.secret_key = os.environ.get("HOIKU_SECRET_KEY") or secrets.token_hex(32)
@@ -373,6 +391,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         database_path or os.environ.get("HOIKU_DATABASE", ROOT / "childcare.db")
     )
     initialize_database(app.config["DATABASE"])
+    initialize_reservation_attempts(app.config["DATABASE"])
     sync_guardian_passwords(app.config["DATABASE"])
     sync_child_karte_statuses(app.config["DATABASE"])
 
@@ -475,6 +494,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             JOIN children c ON c.child_id = r.child_id
             WHERE c.guardian_id = ?
               AND (r.status = 'confirmed'
+                   OR r.status = 'waitlisted'
                    OR (r.status = 'held'
                        AND r.hold_expires_at > datetime('now', 'localtime')))
             ORDER BY r.care_date, r.start_hour
@@ -487,7 +507,11 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 "date": row["care_date"],
                 "time": f"{row['start_hour']}:00～{row['end_hour']}:00",
                 "child_name": row["child_name"],
-                "status": "仮押さえ中" if row["status"] == "held" else "予約済み",
+                "status": {
+                    "held": "仮押さえ中",
+                    "confirmed": "予約済み",
+                    "waitlisted": "キャンセル待ち",
+                }[row["status"]],
             }
             for row in rows
         ]
@@ -524,9 +548,13 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             """,
             (reservation_id, guardian_id),
         ).fetchone()
-        if reservation is None or reservation["status"] != "held":
+        if reservation is None or reservation["status"] not in {
+            "held",
+            "confirmed",
+            "waitlisted",
+        }:
             connection.rollback()
-            flash("取り消せる仮押さえが見つかりません。", "error")
+            flash("キャンセル可能な予約が見つかりません。", "error")
             return redirect("/mypage")
 
         connection.execute(
@@ -543,7 +571,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             (reservation_id,),
         )
         connection.commit()
-        flash("仮押さえを取り消しました。", "success")
+        flash("予約をキャンセルしました。", "success")
         return redirect("/mypage")
 
     @app.teardown_appcontext
@@ -593,6 +621,22 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             care_date=care_date,
             slots=[dict(row) for row in rows],
         )
+
+    @app.get("/api/waitlist/order")
+    def waitlist_order() -> Response:
+        rows = get_database().execute(
+            """
+            SELECT r.reservation_id
+            FROM reservations r
+            JOIN reservation_attempts a ON a.reservation_id = r.reservation_id
+            JOIN children c ON c.child_id = r.child_id
+            JOIN guardians g ON g.guardian_id = c.guardian_id
+            WHERE r.status = 'waitlisted'
+            ORDER BY g.priority_points DESC, a.attempted_at_ms ASC,
+                     r.reservation_id ASC
+            """
+        ).fetchall()
+        return jsonify(reservation_ids=[row["reservation_id"] for row in rows])
 
     @app.get("/api/availability/month")
     def monthly_availability() -> Response | tuple[Response, int]:
@@ -726,82 +770,27 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
             existing = connection.execute(
                 """
-                SELECT reservation_id, start_hour, end_hour, status, hold_expires_at
+                SELECT reservation_id
                 FROM reservations
                 WHERE child_id = ? AND care_date = ?
-                  AND (status = 'confirmed'
+                  AND start_hour < ? AND end_hour > ?
+                  AND (status IN ('confirmed', 'waitlisted')
                        OR (status = 'held'
                            AND hold_expires_at > datetime('now', 'localtime')))
-                ORDER BY reservation_id
                 LIMIT 1
                 """,
-                (child_id, care_date),
+                (child_id, care_date, end_hour, start_hour),
             ).fetchone()
+            if existing is not None:
+                raise ApiError(
+                    "同じ時間帯に有効な予約またはキャンセル待ちがあります。",
+                    409,
+                )
+
             hours = end_hour - start_hour
             fee_yen = age_class["hourly_fee_yen"] * hours
-            if existing is not None:
-                if existing["status"] == "confirmed":
-                    raise ApiError(
-                        "同日の予約はすでに確定しています。確定後のコース変更はできません。",
-                        409,
-                    )
 
-                existing_course = next(
-                    (
-                        name
-                        for name, interval in COURSES.items()
-                        if interval
-                        == (existing["start_hour"], existing["end_hour"])
-                    ),
-                    None,
-                )
-                if existing_course is None or existing_course == "full_day":
-                    raise ApiError("同日の有効な仮押さえがあります。", 409)
-                if course == existing_course:
-                    raise ApiError("同じコースがすでに仮押さえされています。", 409)
-
-                reservation_id = existing["reservation_id"]
-                connection.execute(
-                    "DELETE FROM reservation_hours WHERE reservation_id = ?",
-                    (reservation_id,),
-                )
-                connection.execute(
-                    """
-                    UPDATE reservations
-                    SET start_hour = 9, end_hour = 17, age_class_id = ?,
-                        staff_cost = ?, fee_yen = ?,
-                        updated_at = datetime('now', 'localtime')
-                    WHERE reservation_id = ?
-                    """,
-                    (
-                        age_class["age_class_id"],
-                        age_class["staff_cost"],
-                        age_class["hourly_fee_yen"] * 8,
-                        reservation_id,
-                    ),
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO reservation_hours (reservation_id, care_date, hour)
-                    VALUES (?, ?, ?)
-                    """,
-                    ((reservation_id, care_date, hour) for hour in range(9, 17)),
-                )
-                connection.commit()
-                return (
-                    jsonify(
-                        reservation_id=reservation_id,
-                        status="held",
-                        course="full_day",
-                        start_hour=9,
-                        end_hour=17,
-                        hold_expires_at=existing["hold_expires_at"],
-                        fee_yen=age_class["hourly_fee_yen"] * 8,
-                    ),
-                    200,
-                )
-
-                        # Python側の書き込みロックを解除してから、Cに新規予約を任せる。
+            # Python側の書き込みロックを解除してから、Cに新規予約を任せる。
             connection.rollback()
 
             try:
@@ -832,57 +821,56 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
             reservation = connection.execute(
                 """
-                SELECT hold_expires_at, fee_yen
+                SELECT status, hold_expires_at, fee_yen
                 FROM reservations
                 WHERE reservation_id = ?
                 """,
                 (reservation_id,),
             ).fetchone()
+            if reservation is None or reservation["status"] != status:
+                app.logger.error(
+                    "Cの予約結果とデータベースが一致しません: reservation_id=%s",
+                    reservation_id,
+                )
+                return error_response("予約結果をデータベースから取得できません。", 500)
 
-            return (
-                jsonify(
-                    reservation_id=reservation_id,
-                    status=status,
-                    course=course,
-                    start_hour=start_hour,
-                    end_hour=end_hour,
-                    hold_expires_at=reservation["hold_expires_at"],
-                    fee_yen=reservation["fee_yen"],
-                ),
-                201,
-            )
-            connection.commit()
-        except ApiError as error:
-            connection.rollback()
-            return error_response(str(error), error.status)
-        except sqlite3.IntegrityError as error:
-            connection.rollback()
-            if str(error) in {"定員超過", "保育士リソース超過"}:
+            waitlisted = status == "waitlisted"
+            points_awarded = 0
+            priority_points = None
+            if waitlisted:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     points_awarded, priority_points = _award_waitlist_points(
-                        connection, child_id
+                        connection, child_id, reservation_id
                     )
                     connection.commit()
                 except Exception:
                     connection.rollback()
                     raise
-                message = (
-                    "予約枠が定員または保育士配置の上限に達しています。"
-                    f"優先ポイントを{points_awarded}ポイント付与しました。"
-                )
-                return (
-                    jsonify(
-                        error=message,
-                        points_awarded=points_awarded,
-                        priority_points=priority_points,
-                    ),
-                    409,
-                )
+        except ApiError as error:
+            connection.rollback()
+            return error_response(str(error), error.status)
+        except sqlite3.IntegrityError as error:
+            connection.rollback()
             return error_response(f"予約枠を確保できませんでした: {error}", 409)
         except Exception:
             connection.rollback()
             raise
+
+        if waitlisted:
+            return (
+                jsonify(
+                    reservation_id=reservation_id,
+                    status="waitlisted",
+                    course=course,
+                    start_hour=start_hour,
+                    end_hour=end_hour,
+                    fee_yen=fee_yen,
+                    points_awarded=points_awarded,
+                    priority_points=priority_points,
+                ),
+                202,
+            )
 
         return (
             jsonify(
@@ -891,8 +879,8 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 course=course,
                 start_hour=start_hour,
                 end_hour=end_hour,
-                hold_expires_at=hold_expires_at,
-                fee_yen=fee_yen,
+                hold_expires_at=reservation["hold_expires_at"],
+                fee_yen=reservation["fee_yen"],
             ),
             201,
         )
@@ -947,15 +935,16 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         connection = get_database()
         connection.execute("BEGIN IMMEDIATE")
         reservation = connection.execute(
-            "SELECT status FROM reservations WHERE reservation_id = ?",
+            """
+            SELECT status FROM reservations
+            WHERE reservation_id = ?
+              AND status IN ('held', 'confirmed', 'waitlisted')
+            """,
             (reservation_id,),
         ).fetchone()
         if reservation is None:
             connection.rollback()
-            return error_response("予約が見つかりません。", 404)
-        if reservation["status"] != "held":
-            connection.rollback()
-            return error_response("仮押さえ中の予約ではありません。", 409)
+            return error_response("キャンセル可能な予約が見つかりません。", 404)
 
         connection.execute(
             """
@@ -985,7 +974,7 @@ def _integer(value: Any) -> int | None:
 
 
 def _award_waitlist_points(
-    connection: sqlite3.Connection, child_id: int
+    connection: sqlite3.Connection, child_id: int, reservation_id: int
 ) -> tuple[int, int]:
     setting = connection.execute(
         "SELECT value FROM settings WHERE key = 'waitlist_lose_points'"
@@ -1023,9 +1012,14 @@ def _award_waitlist_points(
             """
             INSERT INTO point_ledger (
                 guardian_id, delta, balance_after, reason, reservation_id
-            ) VALUES (?, ?, ?, 'conflict_lose', NULL)
+            ) VALUES (?, ?, ?, 'conflict_lose', ?)
             """,
-            (guardian_id, points, balance["priority_points"]),
+            (
+                guardian_id,
+                points,
+                balance["priority_points"],
+                reservation_id,
+            ),
         )
     return points, balance["priority_points"]
 

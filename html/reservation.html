@@ -373,10 +373,20 @@ document.getElementById("reservationForm").onsubmit = async function(e) {
             throw new Error(result.error || "仮押さえを作成できませんでした。");
         }
         currentHoldId = result.reservation_id;
+        if (result.status === "waitlisted") {
+            message.textContent =
+                `キャンセル待ちに登録しました。優先ポイントを${result.points_awarded}ポイント付与しました（現在${result.priority_points}ポイント）。`;
+            document.getElementById("confirmButton").hidden = true;
+            document.getElementById("cancelButton").hidden = false;
+            document.getElementById("cancelButton").textContent = "キャンセル待ちを取り消す";
+            renderCalendar();
+            return;
+        }
         message.textContent =
             `仮押さえしました。料金: ${result.fee_yen.toLocaleString()}円。内容を確認して確定してください。`;
         document.getElementById("confirmButton").hidden = false;
         document.getElementById("cancelButton").hidden = false;
+        document.getElementById("cancelButton").textContent = "仮押さえを取消";
         renderCalendar();
     } catch (error) {
         message.textContent =
@@ -392,7 +402,7 @@ document.getElementById("confirmButton").onclick = async function() {
 
 document.getElementById("cancelButton").onclick = async function() {
     if (currentHoldId === null) return;
-    await updateHold(`/api/holds/${currentHoldId}`, "DELETE", "仮押さえを取り消しました。");
+    await updateHold(`/api/holds/${currentHoldId}`, "DELETE", "予約をキャンセルしました。");
 };
 
 async function updateHold(url, method, successMessage) {

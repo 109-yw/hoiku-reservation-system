@@ -153,8 +153,7 @@ header {
                     <p>お子様：{{ reservation.child_name }}</p>
                     <p>予約状況：{{ reservation.status }}</p>
 
-                    <!-- キャンセル可能な予約 -->
-                    {% if reservation.status == "仮押さえ中" %}
+                    {% if reservation.status in ["仮押さえ中", "予約済み", "キャンセル待ち"] %}
 
                         <form action="/cancel"
                               method="POST"
@@ -212,4 +211,3 @@ function confirmCancel() {
 
 </body>
 </html>
-

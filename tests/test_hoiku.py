@@ -289,12 +289,12 @@ class ReservationApiTests(unittest.TestCase):
         )
 
         self.assertEqual(accepted.status_code, 201)
-        self.assertEqual(rejected.status_code, 409)
+        self.assertEqual(rejected.status_code, 202)
+        self.assertEqual(rejected.json["status"], "waitlisted")
         self.assertEqual(rejected.json["points_awarded"], 1)
         self.assertEqual(rejected.json["priority_points"], 1)
         self.assertEqual(rejected_again.status_code, 409)
-        self.assertEqual(rejected_again.json["points_awarded"], 1)
-        self.assertEqual(rejected_again.json["priority_points"], 2)
+        self.assertEqual(rejected_again.json["error"], "同じ時間帯に有効な予約またはキャンセル待ちがあります。")
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
             result = connection.execute(
                 """
@@ -307,16 +307,93 @@ class ReservationApiTests(unittest.TestCase):
                 """,
                 (guardian_id,),
             ).fetchone()
+            attempt = connection.execute(
+                """
+                SELECT attempted_at_ms
+                FROM reservation_attempts
+                WHERE reservation_id = ?
+                """,
+                (rejected.json["reservation_id"],),
+            ).fetchone()
 
         self.assertEqual(
             result,
-            (2, 1, 2, "conflict_lose", None),
+            (
+                1,
+                1,
+                1,
+                "conflict_lose",
+                rejected.json["reservation_id"],
+            ),
         )
+        self.assertIsNotNone(attempt)
         with self.client.session_transaction() as browser_session:
             browser_session["guardian_id"] = guardian_id
         mypage = self.client.get("/mypage")
-        self.assertIn(b"2 \xe3\x83\x9d\xe3\x82\xa4\xe3\x83\xb3\xe3\x83\x88", mypage.data)
+        self.assertIn(b"1 \xe3\x83\x9d\xe3\x82\xa4\xe3\x83\xb3\xe3\x83\x88", mypage.data)
+        self.assertIn("キャンセル待ち".encode(), mypage.data)
         mypage.close()
+
+        order = self.client.get("/api/waitlist/order")
+        self.assertEqual(order.status_code, 200)
+        self.assertEqual(order.json["reservation_ids"], [rejected.json["reservation_id"]])
+
+        cancelled = self.client.delete(
+            f"/api/holds/{rejected.json['reservation_id']}"
+        )
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(
+            self.client.get("/api/waitlist/order").json["reservation_ids"], []
+        )
+
+    def test_waitlist_order_uses_points_before_attempt_time(self) -> None:
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            first_child_id = 1
+            first_guardian_id = connection.execute(
+                "SELECT guardian_id FROM children WHERE child_id = ?",
+                (first_child_id,),
+            ).fetchone()[0]
+            second_child_id, second_guardian_id = connection.execute(
+                """
+                SELECT child_id, guardian_id FROM children
+                WHERE guardian_id != ?
+                ORDER BY child_id LIMIT 1
+                """,
+                (first_guardian_id,),
+            ).fetchone()
+            connection.execute(
+                "UPDATE settings SET value = '0' WHERE key = 'max_children'"
+            )
+            connection.execute(
+                "UPDATE guardians SET priority_points = 5 WHERE guardian_id = ?",
+                (second_guardian_id,),
+            )
+            connection.commit()
+
+        first = self.client.post(
+            "/api/holds",
+            json={
+                "child_id": first_child_id,
+                "care_date": "2026-11-11",
+                "course": "morning",
+            },
+        )
+        second = self.client.post(
+            "/api/holds",
+            json={
+                "child_id": second_child_id,
+                "care_date": "2026-11-11",
+                "course": "morning",
+            },
+        )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        order = self.client.get("/api/waitlist/order")
+        self.assertEqual(
+            order.json["reservation_ids"],
+            [second.json["reservation_id"], first.json["reservation_id"]],
+        )
 
     def test_afternoon_course_uses_fixed_hours(self) -> None:
         response = self.client.post(
@@ -347,7 +424,7 @@ class ReservationApiTests(unittest.TestCase):
         self.assertEqual(response.json["start_hour"], 9)
         self.assertEqual(response.json["end_hour"], 17)
 
-    def test_morning_and_afternoon_holds_become_one_full_day_hold(self) -> None:
+    def test_morning_and_afternoon_holds_are_separate_non_overlapping_reservations(self) -> None:
         payload = {
             "child_id": 1,
             "care_date": "2026-11-11",
@@ -360,13 +437,13 @@ class ReservationApiTests(unittest.TestCase):
         )
 
         self.assertEqual(morning.status_code, 201)
-        self.assertEqual(afternoon.status_code, 200)
-        self.assertEqual(
+        self.assertEqual(afternoon.status_code, 201)
+        self.assertNotEqual(
             afternoon.json["reservation_id"],
             morning.json["reservation_id"],
         )
-        self.assertEqual(afternoon.json["course"], "full_day")
-        self.assertEqual(afternoon.json["fee_yen"], 8000)
+        self.assertEqual(afternoon.json["course"], "afternoon")
+        self.assertEqual(afternoon.json["fee_yen"], 4000)
 
     def test_rejects_duplicate_or_invalid_course(self) -> None:
         payload = {
@@ -384,7 +461,7 @@ class ReservationApiTests(unittest.TestCase):
             400,
         )
 
-    def test_confirmed_half_day_cannot_be_extended_automatically(self) -> None:
+    def test_confirmed_half_day_allows_non_overlapping_reservation(self) -> None:
         morning = self.client.post(
             "/api/holds",
             json={
@@ -405,7 +482,7 @@ class ReservationApiTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(afternoon.status_code, 409)
+        self.assertEqual(afternoon.status_code, 201)
 
     def test_cancelled_hold_can_be_booked_again(self) -> None:
         payload = {
