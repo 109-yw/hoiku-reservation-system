@@ -607,7 +607,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             reservation_id = int(request.form.get("reservation_id", ""))
         except ValueError:
             flash("予約番号が正しくありません。", "error")
-            return redirect("/mypage")
+            return redirect("/html/user_home.html")
 
         connection = get_database()
         connection.execute("BEGIN IMMEDIATE")
@@ -636,7 +636,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         except ApiError as error:
             connection.rollback()
             flash(str(error), "error")
-            return redirect("/mypage")
+            return redirect("/html/user_home.html")
         except Exception:
             connection.rollback()
             raise
@@ -645,7 +645,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 app, app.config["DATABASE"], notification_offer_id
             )
         flash("予約をキャンセルしました。", "success")
-        return redirect("/mypage")
+        return redirect("/html/user_home.html")
 
     @app.teardown_appcontext
     def close_database(_: BaseException | None = None) -> None:
