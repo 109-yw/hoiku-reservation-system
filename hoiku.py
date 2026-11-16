@@ -1099,7 +1099,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 result = subprocess.run(
                     [
                         str(ROOT / "hoiku_cli.exe"),
-                        str(Path(app.config["DATABASE"]).resolve()),
+                        str(Path(app.config["DATABASE"]).resolve().relative_to(ROOT)),
                         str(child_id),
                         care_date,
                         str(start_hour),
