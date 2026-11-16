@@ -6,6 +6,7 @@ import io
 import os
 import secrets
 import sqlite3
+import subprocess
 import tempfile
 import time
 import zipfile
@@ -789,7 +790,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             hours = end_hour - start_hour
             fee_yen = age_class["hourly_fee_yen"] * hours
 
-                        # Python側の書き込みロックを解除してから、Cに新規予約を任せる。
+            # Python側の書き込みロックを解除してから、Cに新規予約を任せる。
             connection.rollback()
 
             try:
@@ -820,121 +821,32 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
             reservation = connection.execute(
                 """
-                SELECT hold_expires_at, fee_yen
+                SELECT status, hold_expires_at, fee_yen
                 FROM reservations
                 WHERE reservation_id = ?
                 """,
                 (reservation_id,),
             ).fetchone()
-<<<<<<< HEAD
-            if timeout_row is None:
-                raise RuntimeError("hold_timeout_sec is missing from settings")
-            hold_expires_at = (
-                datetime.now() + timedelta(seconds=int(timeout_row["value"]))
-            ).strftime("%Y-%m-%d %H:%M:%S")
+            if reservation is None or reservation["status"] != status:
+                app.logger.error(
+                    "Cの予約結果とデータベースが一致しません: reservation_id=%s",
+                    reservation_id,
+                )
+                return error_response("予約結果をデータベースから取得できません。", 500)
 
-            capacity_settings = connection.execute(
-                """
-                SELECT key, value FROM settings
-                WHERE key IN ('max_children', 'staff_count')
-                """
-            ).fetchall()
-            settings = {row["key"]: row["value"] for row in capacity_settings}
-            if set(settings) != {"max_children", "staff_count"}:
-                raise RuntimeError("Reservation capacity settings are incomplete")
-            try:
-                max_children = float(settings["max_children"])
-                staff_count = min(float(settings["staff_count"]), 5.0)
-            except ValueError as error:
-                raise RuntimeError("Reservation capacity settings must be numeric") from error
-            if max_children < 0 or staff_count < 0:
-                raise RuntimeError("Reservation capacity settings cannot be negative")
-
-            waitlisted = False
-            for hour in range(start_hour, end_hour):
-                load = connection.execute(
-                    """
-                    SELECT COUNT(*) AS children_count,
-                           COALESCE(SUM(r.staff_cost), 0.0) AS staff_used
-                    FROM reservation_hours h
-                    JOIN reservations r ON r.reservation_id = h.reservation_id
-                    WHERE h.care_date = ? AND h.hour = ?
-                      AND (r.status = 'confirmed'
-                           OR (r.status = 'held'
-                               AND r.hold_expires_at > datetime('now', 'localtime')))
-                    """,
-                    (care_date, hour),
-                ).fetchone()
-                if (
-                    load["children_count"] >= max_children
-                    or load["staff_used"] + age_class["staff_cost"]
-                    > staff_count + 0.001
-                ):
-                    waitlisted = True
-                    break
-
-            cursor = connection.execute(
-                """
-                INSERT INTO reservations (
-                    child_id, care_date, start_hour, end_hour, age_class_id,
-                    staff_cost, fee_yen, status, hold_expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    child_id,
-                    care_date,
-                    start_hour,
-                    end_hour,
-                    age_class["age_class_id"],
-                    age_class["staff_cost"],
-                    fee_yen,
-                    "waitlisted" if waitlisted else "held",
-                    None if waitlisted else hold_expires_at,
-                ),
-            )
-            reservation_id = cursor.lastrowid
+            waitlisted = status == "waitlisted"
             points_awarded = 0
             priority_points = None
             if waitlisted:
-                attempted_at_ms = time.time_ns() // 1_000_000
-                connection.execute(
-                    """
-                    INSERT INTO reservation_attempts (
-                        reservation_id, attempted_at_ms
-                    ) VALUES (?, ?)
-                    """,
-                    (reservation_id, attempted_at_ms),
-                )
-                points_awarded, priority_points = _award_waitlist_points(
-                    connection, child_id, reservation_id
-                )
-            else:
-                connection.executemany(
-                    """
-                    INSERT INTO reservation_hours (reservation_id, care_date, hour)
-                    VALUES (?, ?, ?)
-                    """,
-                    (
-                        (reservation_id, care_date, hour)
-                        for hour in range(start_hour, end_hour)
-                    ),
-                )
-=======
-
-            return (
-                jsonify(
-                    reservation_id=reservation_id,
-                    status=status,
-                    course=course,
-                    start_hour=start_hour,
-                    end_hour=end_hour,
-                    hold_expires_at=reservation["hold_expires_at"],
-                    fee_yen=reservation["fee_yen"],
-                ),
-                201,
-            )
->>>>>>> 8b44250435324c58956380edc3412ecc65e174a9
-            connection.commit()
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    points_awarded, priority_points = _award_waitlist_points(
+                        connection, child_id, reservation_id
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
         except ApiError as error:
             connection.rollback()
             return error_response(str(error), error.status)
@@ -967,8 +879,8 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 course=course,
                 start_hour=start_hour,
                 end_hour=end_hour,
-                hold_expires_at=hold_expires_at,
-                fee_yen=fee_yen,
+                hold_expires_at=reservation["hold_expires_at"],
+                fee_yen=reservation["fee_yen"],
             ),
             201,
         )
