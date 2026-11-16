@@ -26,6 +26,12 @@ class ReservationApiTests(unittest.TestCase):
         shutil.copy2(self.base_database, database_path)
         self.app = create_app(database_path)
         self.client = self.app.test_client()
+        with closing(sqlite3.connect(database_path)) as connection:
+            guardian_id = connection.execute(
+                "SELECT guardian_id FROM children WHERE child_id = 1"
+            ).fetchone()[0]
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = guardian_id
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -113,6 +119,8 @@ class ReservationApiTests(unittest.TestCase):
         mypage.close()
 
     def test_register_login_and_logout(self) -> None:
+        with self.client.session_transaction() as browser_session:
+            browser_session.clear()
         login_page = self.client.get("/login")
         self.assertEqual(login_page.status_code, 200)
         self.assertIn(b'action="/login"', login_page.data)
@@ -201,6 +209,8 @@ class ReservationApiTests(unittest.TestCase):
         response.close()
 
     def test_registration_rejects_duplicate_email(self) -> None:
+        with self.client.session_transaction() as browser_session:
+            browser_session.clear()
         response = self.client.post(
             "/register",
             data={
@@ -236,34 +246,33 @@ class ReservationApiTests(unittest.TestCase):
         self.assertEqual(confirmed.status_code, 200)
         self.assertEqual(confirmed.json["status"], "confirmed")
 
-    def test_capacity_failure_awards_and_persists_priority_points(self) -> None:
+    def test_cancelled_slot_offers_to_highest_points_and_rewards_unoffered(self) -> None:
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
-            reserved_guardian_id = connection.execute(
+            source_guardian_id = connection.execute(
                 "SELECT guardian_id FROM children WHERE child_id = 1"
             ).fetchone()[0]
-            other_child_id = connection.execute(
+            waitlisted_children = connection.execute(
                 """
-                SELECT child_id FROM children
+                SELECT child_id, guardian_id FROM children
                 WHERE guardian_id != ?
-                ORDER BY child_id LIMIT 1
+                GROUP BY guardian_id
+                ORDER BY child_id LIMIT 2
                 """,
-                (reserved_guardian_id,),
-            ).fetchone()[0]
-            guardian_id = connection.execute(
-                "SELECT guardian_id FROM children WHERE child_id = ?",
-                (other_child_id,),
-            ).fetchone()[0]
-            original_points = connection.execute(
-                "SELECT priority_points FROM guardians WHERE guardian_id = ?",
-                (guardian_id,),
-            ).fetchone()[0]
-            self.assertEqual(original_points, 0)
+                (source_guardian_id,),
+            ).fetchall()
+            self.assertEqual(len(waitlisted_children), 2)
+            high_child_id, high_guardian_id = waitlisted_children[0]
+            unoffered_child_id, unoffered_guardian_id = waitlisted_children[1]
             connection.execute(
                 "UPDATE settings SET value = '1' WHERE key = 'max_children'"
             )
+            connection.execute(
+                "UPDATE guardians SET priority_points = 3 WHERE guardian_id = ?",
+                (high_guardian_id,),
+            )
             connection.commit()
 
-        accepted = self.client.post(
+        source = self.client.post(
             "/api/holds",
             json={
                 "child_id": 1,
@@ -271,80 +280,233 @@ class ReservationApiTests(unittest.TestCase):
                 "course": "morning",
             },
         )
-        rejected = self.client.post(
+        self.assertEqual(source.status_code, 201)
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = high_guardian_id
+        high_waitlist = self.client.post(
             "/api/holds",
             json={
-                "child_id": other_child_id,
+                "child_id": high_child_id,
                 "care_date": "2026-11-11",
                 "course": "morning",
             },
         )
-        rejected_again = self.client.post(
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = unoffered_guardian_id
+        unoffered_waitlist = self.client.post(
             "/api/holds",
             json={
-                "child_id": other_child_id,
+                "child_id": unoffered_child_id,
                 "care_date": "2026-11-11",
                 "course": "morning",
             },
         )
 
-        self.assertEqual(accepted.status_code, 201)
-        self.assertEqual(rejected.status_code, 202)
-        self.assertEqual(rejected.json["status"], "waitlisted")
-        self.assertEqual(rejected.json["points_awarded"], 1)
-        self.assertEqual(rejected.json["priority_points"], 1)
-        self.assertEqual(rejected_again.status_code, 409)
-        self.assertEqual(rejected_again.json["error"], "同じ時間帯に有効な予約またはキャンセル待ちがあります。")
+        self.assertEqual(high_waitlist.status_code, 202)
+        self.assertEqual(unoffered_waitlist.status_code, 202)
+        self.assertEqual(high_waitlist.json["status"], "waitlisted")
+        self.assertEqual(unoffered_waitlist.json["status"], "waitlisted")
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = source_guardian_id
+        cancelled = self.client.delete(f"/api/holds/{source.json['reservation_id']}")
+        self.assertEqual(cancelled.status_code, 200)
+
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
-            result = connection.execute(
+            offer = connection.execute(
                 """
-                SELECT g.priority_points, l.delta, l.balance_after,
-                       l.reason, l.reservation_id
-                FROM guardians g
-                JOIN point_ledger l ON l.guardian_id = g.guardian_id
-                WHERE g.guardian_id = ?
-                ORDER BY l.ledger_id DESC LIMIT 1
-                """,
-                (guardian_id,),
-            ).fetchone()
-            attempt = connection.execute(
-                """
-                SELECT attempted_at_ms
-                FROM reservation_attempts
+                SELECT offer_id, reservation_id, status
+                FROM waitlist_offers
                 WHERE reservation_id = ?
                 """,
-                (rejected.json["reservation_id"],),
+                (high_waitlist.json["reservation_id"],),
             ).fetchone()
-
-        self.assertEqual(
-            result,
-            (
-                1,
-                1,
-                1,
-                "conflict_lose",
-                rejected.json["reservation_id"],
-            ),
-        )
-        self.assertIsNotNone(attempt)
-        with self.client.session_transaction() as browser_session:
-            browser_session["guardian_id"] = guardian_id
-        mypage = self.client.get("/mypage")
-        self.assertIn(b"1 \xe3\x83\x9d\xe3\x82\xa4\xe3\x83\xb3\xe3\x83\x88", mypage.data)
-        self.assertIn("キャンセル待ち".encode(), mypage.data)
-        mypage.close()
+            self.assertEqual(
+                offer[1:],
+                (high_waitlist.json["reservation_id"], "pending"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM reservations WHERE reservation_id = ?",
+                    (high_waitlist.json["reservation_id"],),
+                ).fetchone()[0],
+                "held",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM reservations WHERE reservation_id = ?",
+                    (unoffered_waitlist.json["reservation_id"],),
+                ).fetchone()[0],
+                "waitlisted",
+            )
 
         order = self.client.get("/api/waitlist/order")
-        self.assertEqual(order.status_code, 200)
-        self.assertEqual(order.json["reservation_ids"], [rejected.json["reservation_id"]])
-
-        cancelled = self.client.delete(
-            f"/api/holds/{rejected.json['reservation_id']}"
-        )
-        self.assertEqual(cancelled.status_code, 200)
         self.assertEqual(
-            self.client.get("/api/waitlist/order").json["reservation_ids"], []
+            order.json["reservation_ids"],
+            [unoffered_waitlist.json["reservation_id"]],
         )
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = high_guardian_id
+        mypage = self.client.get("/mypage")
+        self.assertIn("キャンセル待ちオファー".encode(), mypage.data)
+        accepted = self.client.post(f"/api/waitlist/offers/{offer[0]}/accept")
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json["priority_points"], 0)
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+                    (high_guardian_id,),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+                    (unoffered_guardian_id,),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT delta, reason FROM point_ledger
+                    WHERE guardian_id = ? ORDER BY ledger_id DESC LIMIT 1
+                    """,
+                    (high_guardian_id,),
+                ).fetchone(),
+                (-3, "waitlist_promoted"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT delta, reason FROM point_ledger
+                    WHERE guardian_id = ? ORDER BY ledger_id DESC LIMIT 1
+                    """,
+                    (unoffered_guardian_id,),
+                ).fetchone(),
+                (1, "conflict_lose"),
+            )
+        self.assertEqual(
+            self.client.get("/api/waitlist/order").json["reservation_ids"],
+            [unoffered_waitlist.json["reservation_id"]],
+        )
+        mypage.close()
+
+    def test_declined_and_expired_offers_advance_to_next_waitlisted_child(self) -> None:
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            source_guardian_id = connection.execute(
+                "SELECT guardian_id FROM children WHERE child_id = 1"
+            ).fetchone()[0]
+            waitlisted_children = connection.execute(
+                """
+                SELECT MIN(child_id), guardian_id FROM children
+                WHERE guardian_id != ?
+                GROUP BY guardian_id
+                ORDER BY MIN(child_id) LIMIT 4
+                """,
+                (source_guardian_id,),
+            ).fetchall()
+            connection.execute(
+                "UPDATE settings SET value = '1' WHERE key = 'max_children'"
+            )
+            connection.commit()
+
+        source = self.client.post(
+            "/api/holds",
+            json={
+                "child_id": 1,
+                "care_date": "2026-11-11",
+                "course": "morning",
+            },
+        )
+        self.assertEqual(source.status_code, 201)
+
+        waitlist_responses = []
+        for child_id, guardian_id in waitlisted_children:
+            with self.client.session_transaction() as browser_session:
+                browser_session["guardian_id"] = guardian_id
+            response = self.client.post(
+                "/api/holds",
+                json={
+                    "child_id": child_id,
+                    "care_date": "2026-11-11",
+                    "course": "morning",
+                },
+            )
+            self.assertEqual(response.status_code, 202)
+            waitlist_responses.append((response, guardian_id))
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = source_guardian_id
+        cancelled = self.client.delete(f"/api/holds/{source.json['reservation_id']}")
+        self.assertEqual(cancelled.status_code, 200)
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            first_offer = connection.execute(
+                "SELECT offer_id FROM waitlist_offers WHERE reservation_id = ?",
+                (waitlist_responses[0][0].json["reservation_id"],),
+            ).fetchone()[0]
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = waitlist_responses[0][1]
+        declined = self.client.post(f"/api/waitlist/offers/{first_offer}/decline")
+        self.assertEqual(declined.status_code, 200)
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            second_offer = connection.execute(
+                "SELECT offer_id FROM waitlist_offers WHERE reservation_id = ?",
+                (waitlist_responses[1][0].json["reservation_id"],),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE waitlist_offers SET respond_by = '2000-01-01 00:00:00' "
+                "WHERE offer_id = ?",
+                (second_offer,),
+            )
+            connection.commit()
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = waitlist_responses[1][1]
+        expired_response = self.client.post(
+            f"/api/waitlist/offers/{second_offer}/accept"
+        )
+        self.assertEqual(expired_response.status_code, 410)
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            third_offer = connection.execute(
+                """
+                SELECT offer_id, status FROM waitlist_offers
+                WHERE reservation_id = ?
+                """,
+                (waitlist_responses[2][0].json["reservation_id"],),
+            ).fetchone()
+            second_status = connection.execute(
+                "SELECT status FROM waitlist_offers WHERE offer_id = ?",
+                (second_offer,),
+            ).fetchone()[0]
+        self.assertEqual(third_offer[1], "pending")
+        self.assertEqual(second_status, "expired")
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = waitlist_responses[2][1]
+        accepted = self.client.post(
+            f"/api/waitlist/offers/{third_offer[0]}/accept"
+        )
+        self.assertEqual(accepted.status_code, 200)
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            unoffered_points = connection.execute(
+                "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+                (waitlist_responses[3][1],),
+            ).fetchone()[0]
+            offered_points = connection.execute(
+                "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+                (waitlist_responses[0][1],),
+            ).fetchone()[0]
+        self.assertEqual(unoffered_points, 1)
+        self.assertEqual(offered_points, 0)
 
     def test_waitlist_order_uses_points_before_attempt_time(self) -> None:
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
@@ -378,6 +540,8 @@ class ReservationApiTests(unittest.TestCase):
                 "course": "morning",
             },
         )
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = second_guardian_id
         second = self.client.post(
             "/api/holds",
             json={

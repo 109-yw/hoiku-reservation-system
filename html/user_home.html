@@ -150,6 +150,27 @@ header {
     </a>
 </div>
 
+{% if pending_offers %}
+<div class="card">
+    <h2>キャンセル待ちオファー</h2>
+    {% for offer in pending_offers %}
+    <div class="reservation">
+        <p>{{ offer.care_date }} {{ offer.start_hour }}:00～{{ offer.end_hour }}:00</p>
+        <p>お子様：{{ offer.child_name }}</p>
+        <p>回答期限：{{ offer.respond_by }}</p>
+        <button type="button" class="button"
+                onclick="respondToOffer({{ offer.offer_id }}, 'accept')">
+            オファーを受諾
+        </button>
+        <button type="button" class="button cancel"
+                onclick="respondToOffer({{ offer.offer_id }}, 'decline')">
+            辞退
+        </button>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 
     <!-- 予約状況 -->
     <div class="card">
@@ -218,6 +239,25 @@ header {
 <script>
 function confirmCancel() {
     return confirm("この予約をキャンセルしますか？");
+}
+
+async function respondToOffer(offerId, response) {
+    const action = response === "accept" ? "受諾" : "辞退";
+    if (!confirm(`キャンセル待ちオファーを${action}しますか？`)) return;
+
+    const result = await fetch(
+        `/api/waitlist/offers/${offerId}/${response}`,
+        {method: "POST"}
+    );
+    const body = await result.json();
+    if (!result.ok) {
+        alert(body.error || "オファーを処理できませんでした。");
+        return;
+    }
+    alert(response === "accept"
+        ? "予約が成立しました。優先ポイントは0にリセットされました。"
+        : "オファーを辞退しました。次の方へ案内します。");
+    window.location.reload();
 }
 </script>
 

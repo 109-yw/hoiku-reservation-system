@@ -191,19 +191,14 @@ input, select {
 
         <h2 id="selectedDate"></h2>
 
-        <p>児童IDと希望利用時間を選択してください。</p>
+        <p>お子様と希望利用時間を選択してください。</p>
 
         <form id="waitingForm">
 
-            <label for="childId">児童ID</label>
-            <input
-                id="childId"
-                type="text"
-                inputmode="numeric"
-                pattern="[0-9]+"
-                placeholder="児童IDを入力してください"
-                required
-            >
+            <fieldset id="childrenList">
+                <legend>お子様</legend>
+                <p id="childrenMessage" class="message">お子様情報を読み込んでいます。</p>
+            </fieldset>
 
             <label for="time">希望利用時間</label>
             <select id="time" required>
@@ -416,15 +411,52 @@ function selectDate(dateKey, button) {
         "block";
 }
 
-// 申請内容の確認
+async function loadChildren() {
+    const list = document.getElementById("childrenList");
+    const message = document.getElementById("childrenMessage");
+    try {
+        const response = await fetch("/api/children");
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || "お子様情報を取得できませんでした。");
+        }
+        message.remove();
+        if (result.children.length === 0) {
+            list.insertAdjacentHTML("beforeend", "<p>予約可能なお子様が登録されていません。</p>");
+            return;
+        }
+        result.children.forEach(child => {
+            const label = document.createElement("label");
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.name = "childId";
+            checkbox.value = child.child_id;
+            checkbox.required = true;
+            label.append(checkbox, document.createTextNode(` ${child.name}`));
+            list.appendChild(label);
+        });
+    } catch (error) {
+        message.textContent = error.message || "お子様情報を取得できませんでした。";
+        message.classList.add("error");
+    }
+}
+
+// 申請内容の確認・保存
 document.getElementById("waitingForm").onsubmit =
-function(e) {
+async function(e) {
     e.preventDefault();
 
     if (!selectedDate) return;
 
-    const childId =
-        document.getElementById("childId").value;
+    const selectedChildren = Array.from(
+        document.querySelectorAll('input[name="childId"]:checked')
+    );
+    if (selectedChildren.length !== 1) {
+        document.getElementById("waitingMessage").textContent =
+            "お子様を1人選択してください。";
+        return;
+    }
+    const childId = Number(selectedChildren[0].value);
 
     const time =
         document.getElementById("time");
@@ -438,17 +470,38 @@ function(e) {
         "児童ID：" + childId + "\n" +
         "利用時間：" + timeText;
 
-    if (confirm(message)) {
-        const waitingMessage =
-            document.getElementById("waitingMessage");
+    if (!confirm(message)) return;
 
+    const waitingMessage = document.getElementById("waitingMessage");
+    waitingMessage.classList.remove("error");
+    waitingMessage.textContent = "キャンセル待ちを登録しています。";
+    try {
+        const response = await fetch("/api/holds", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                child_id: childId,
+                care_date: selectedDate,
+                course: time.value
+            })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || "キャンセル待ちを登録できませんでした。");
+        }
+        if (result.status !== "waitlisted") {
+            await fetch(`/api/holds/${result.reservation_id}`, {method: "DELETE"});
+            throw new Error("選択した時間帯に空きができています。通常の予約画面からお申し込みください。");
+        }
         waitingMessage.textContent =
-            "申請内容を確認しました。" +
-            "現在は画面確認用のため、" +
-            "申請データはまだ保存されていません。";
+            "キャンセル待ちを登録しました。空きが出た場合は、優先ポイント順にオファーをメールでお知らせします。";
+    } catch (error) {
+        waitingMessage.textContent = error.message || "キャンセル待ちを登録できませんでした。";
+        waitingMessage.classList.add("error");
     }
 };
 
+loadChildren();
 renderCalendar();
 </script>
 

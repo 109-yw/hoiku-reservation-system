@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import csv
+from email.message import EmailMessage
 import hashlib
 import io
 import os
 import secrets
 import sqlite3
+import smtplib
+import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from contextlib import closing
@@ -376,6 +380,47 @@ def initialize_reservation_attempts(database_path: str | Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS waitlist_dispatches (
+                dispatch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cancelled_reservation_id INTEGER NOT NULL UNIQUE,
+                care_date TEXT NOT NULL,
+                start_hour INTEGER NOT NULL,
+                end_hour INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'filled', 'exhausted')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                resolved_at TEXT,
+                FOREIGN KEY (cancelled_reservation_id)
+                    REFERENCES reservations(reservation_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS waitlist_dispatch_participants (
+                dispatch_id INTEGER NOT NULL,
+                reservation_id INTEGER NOT NULL,
+                offered INTEGER NOT NULL DEFAULT 0 CHECK (offered IN (0, 1)),
+                PRIMARY KEY (dispatch_id, reservation_id),
+                FOREIGN KEY (dispatch_id)
+                    REFERENCES waitlist_dispatches(dispatch_id) ON DELETE CASCADE,
+                FOREIGN KEY (reservation_id)
+                    REFERENCES reservations(reservation_id) ON DELETE CASCADE
+            )
+            """
+        )
+        offer_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(waitlist_offers)")
+        }
+        if "dispatch_id" not in offer_columns:
+            connection.execute(
+                """
+                ALTER TABLE waitlist_offers
+                ADD COLUMN dispatch_id INTEGER REFERENCES waitlist_dispatches(dispatch_id)
+                """
+            )
         connection.commit()
 
 
@@ -402,6 +447,10 @@ def create_app(database_path: str | Path | None = None) -> Flask:
     @app.get("/html/<path:filename>")
     def html_page(filename: str) -> Response:
         if filename == "login.html":
+            return redirect("/login")
+        if filename in {"reservation.html", "waiting.html"} and not isinstance(
+            session.get("guardian_id"), int
+        ):
             return redirect("/login")
         return send_from_directory(ROOT / "html", filename)
 
@@ -468,6 +517,16 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             return redirect("/login")
 
         connection = get_database()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            notification_ids = _expire_waitlist_offers(connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        for offer_id in notification_ids:
+            _send_waitlist_offer_email(app, app.config["DATABASE"], offer_id)
+
         guardian = connection.execute(
             "SELECT name, priority_points FROM guardians WHERE guardian_id = ?",
             (guardian_id,),
@@ -515,12 +574,25 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             }
             for row in rows
         ]
+        pending_offers = connection.execute(
+            """
+            SELECT o.offer_id, o.respond_by, r.care_date,
+                   r.start_hour, r.end_hour, c.name AS child_name
+            FROM waitlist_offers o
+            JOIN reservations r ON r.reservation_id = o.reservation_id
+            JOIN children c ON c.child_id = r.child_id
+            WHERE c.guardian_id = ? AND o.status = 'pending'
+            ORDER BY o.respond_by, o.offer_id
+            """,
+            (guardian_id,),
+        ).fetchall()
         return render_template(
             "user_home.html",
             name=guardian["name"],
             children=children,
             reservations=reservations,
             points=guardian["priority_points"],
+            pending_offers=pending_offers,
         )
 
     @app.get("/logout")
@@ -539,38 +611,39 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
         connection = get_database()
         connection.execute("BEGIN IMMEDIATE")
-        reservation = connection.execute(
-            """
-            SELECT r.status
-            FROM reservations r
-            JOIN children c ON c.child_id = r.child_id
-            WHERE r.reservation_id = ? AND c.guardian_id = ?
-            """,
-            (reservation_id, guardian_id),
-        ).fetchone()
-        if reservation is None or reservation["status"] not in {
-            "held",
-            "confirmed",
-            "waitlisted",
-        }:
-            connection.rollback()
-            flash("キャンセル可能な予約が見つかりません。", "error")
-            return redirect("/mypage")
+        try:
+            notification_ids = _expire_waitlist_offers(connection)
+            reservation = connection.execute(
+                """
+                SELECT r.status
+                FROM reservations r
+                JOIN children c ON c.child_id = r.child_id
+                WHERE r.reservation_id = ? AND c.guardian_id = ?
+                """,
+                (reservation_id, guardian_id),
+            ).fetchone()
+            if reservation is None or reservation["status"] not in {
+                "held",
+                "confirmed",
+                "waitlisted",
+            }:
+                raise ApiError("キャンセル可能な予約が見つかりません。", 404)
 
-        connection.execute(
-            """
-            UPDATE reservations
-            SET status = 'cancelled', hold_expires_at = NULL,
-                updated_at = datetime('now', 'localtime')
-            WHERE reservation_id = ?
-            """,
-            (reservation_id,),
-        )
-        connection.execute(
-            "DELETE FROM reservation_hours WHERE reservation_id = ?",
-            (reservation_id,),
-        )
-        connection.commit()
+            offer_id = _cancel_reservation_and_dispatch(connection, reservation_id)
+            if offer_id is not None:
+                notification_ids.append(offer_id)
+            connection.commit()
+        except ApiError as error:
+            connection.rollback()
+            flash(str(error), "error")
+            return redirect("/mypage")
+        except Exception:
+            connection.rollback()
+            raise
+        for notification_offer_id in notification_ids:
+            _send_waitlist_offer_email(
+                app, app.config["DATABASE"], notification_offer_id
+            )
         flash("予約をキャンセルしました。", "success")
         return redirect("/mypage")
 
@@ -624,19 +697,229 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
     @app.get("/api/waitlist/order")
     def waitlist_order() -> Response:
+        connection = get_database()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            notification_ids = _expire_waitlist_offers(connection)
+            rows = connection.execute(
+                """
+                SELECT r.reservation_id
+                FROM reservations r
+                JOIN reservation_attempts a ON a.reservation_id = r.reservation_id
+                JOIN children c ON c.child_id = r.child_id
+                JOIN guardians g ON g.guardian_id = c.guardian_id
+                WHERE r.status = 'waitlisted'
+                ORDER BY g.priority_points DESC, a.attempted_at_ms ASC,
+                         r.reservation_id ASC
+                """
+            ).fetchall()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        for offer_id in notification_ids:
+            _send_waitlist_offer_email(app, app.config["DATABASE"], offer_id)
+        return jsonify(reservation_ids=[row["reservation_id"] for row in rows])
+
+    @app.get("/api/children")
+    def guardian_children() -> tuple[Response, int] | Response:
+        guardian_id = session.get("guardian_id")
+        if not isinstance(guardian_id, int):
+            return error_response("ログインが必要です。", 401)
         rows = get_database().execute(
             """
-            SELECT r.reservation_id
-            FROM reservations r
-            JOIN reservation_attempts a ON a.reservation_id = r.reservation_id
-            JOIN children c ON c.child_id = r.child_id
-            JOIN guardians g ON g.guardian_id = c.guardian_id
-            WHERE r.status = 'waitlisted'
-            ORDER BY g.priority_points DESC, a.attempted_at_ms ASC,
-                     r.reservation_id ASC
-            """
+            SELECT child_id, name
+            FROM children
+            WHERE guardian_id = ? AND karte_status = 'approved'
+            ORDER BY child_id
+            """,
+            (guardian_id,),
         ).fetchall()
-        return jsonify(reservation_ids=[row["reservation_id"] for row in rows])
+        return jsonify(children=[dict(row) for row in rows])
+
+    @app.post("/api/waitlist/offers/<int:offer_id>/accept")
+    def accept_waitlist_offer(offer_id: int) -> tuple[Response, int] | Response:
+        guardian_id = session.get("guardian_id")
+        if not isinstance(guardian_id, int):
+            return error_response("ログインが必要です。", 401)
+
+        connection = get_database()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            offer = connection.execute(
+                """
+                SELECT o.status, o.respond_by, o.dispatch_id, r.reservation_id
+                FROM waitlist_offers o
+                JOIN reservations r ON r.reservation_id = o.reservation_id
+                JOIN children c ON c.child_id = r.child_id
+                WHERE o.offer_id = ? AND c.guardian_id = ?
+                """,
+                (offer_id, guardian_id),
+            ).fetchone()
+            if offer is None:
+                raise ApiError("有効なキャンセル待ちオファーがありません。", 404)
+            notification_ids = _expire_waitlist_offers(connection)
+            offer = connection.execute(
+                """
+                SELECT o.status, o.respond_by, o.dispatch_id, r.reservation_id
+                FROM waitlist_offers o
+                JOIN reservations r ON r.reservation_id = o.reservation_id
+                JOIN children c ON c.child_id = r.child_id
+                WHERE o.offer_id = ? AND c.guardian_id = ?
+                """,
+                (offer_id, guardian_id),
+            ).fetchone()
+            if offer["status"] == "expired":
+                connection.commit()
+                for expired_offer_id in notification_ids:
+                    _send_waitlist_offer_email(
+                        app, app.config["DATABASE"], expired_offer_id
+                    )
+                return error_response("オファーの回答期限が切れました。", 410)
+            if offer["status"] != "pending":
+                connection.commit()
+                for expired_offer_id in notification_ids:
+                    _send_waitlist_offer_email(
+                        app, app.config["DATABASE"], expired_offer_id
+                    )
+                return error_response("有効なキャンセル待ちオファーがありません。", 404)
+            if offer["respond_by"] <= datetime.now().strftime("%Y-%m-%d %H:%M:%S"):
+                notification_ids.extend(_expire_waitlist_offers(connection))
+                connection.commit()
+                for expired_offer_id in notification_ids:
+                    _send_waitlist_offer_email(
+                        app, app.config["DATABASE"], expired_offer_id
+                    )
+                return error_response("オファーの回答期限が切れました。", 410)
+
+            connection.execute(
+                """
+                UPDATE waitlist_offers
+                SET status = 'accepted', responded_at = datetime('now', 'localtime')
+                WHERE offer_id = ? AND status = 'pending'
+                """,
+                (offer_id,),
+            )
+            connection.execute(
+                """
+                UPDATE reservations
+                SET status = 'confirmed', hold_expires_at = NULL,
+                    updated_at = datetime('now', 'localtime')
+                WHERE reservation_id = ?
+                """,
+                (offer["reservation_id"],),
+            )
+            if offer["dispatch_id"] is not None:
+                _finish_waitlist_dispatch(
+                    connection, offer["dispatch_id"], "filled"
+                )
+            balance = connection.execute(
+                "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+                (guardian_id,),
+            ).fetchone()["priority_points"]
+            _record_points(
+                connection,
+                guardian_id,
+                -balance,
+                "waitlist_promoted",
+                offer["reservation_id"],
+            )
+            connection.commit()
+        except ApiError as error:
+            connection.rollback()
+            return error_response(str(error), error.status)
+        except Exception:
+            connection.rollback()
+            raise
+
+        for expired_offer_id in notification_ids:
+            _send_waitlist_offer_email(app, app.config["DATABASE"], expired_offer_id)
+        return jsonify(
+            offer_id=offer_id,
+            reservation_id=offer["reservation_id"],
+            status="confirmed",
+            priority_points=0,
+        )
+
+    @app.post("/api/waitlist/offers/<int:offer_id>/decline")
+    def decline_waitlist_offer(offer_id: int) -> tuple[Response, int] | Response:
+        guardian_id = session.get("guardian_id")
+        if not isinstance(guardian_id, int):
+            return error_response("ログインが必要です。", 401)
+
+        connection = get_database()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            offer = connection.execute(
+                """
+                SELECT o.status, o.dispatch_id, r.reservation_id
+                FROM waitlist_offers o
+                JOIN reservations r ON r.reservation_id = o.reservation_id
+                JOIN children c ON c.child_id = r.child_id
+                WHERE o.offer_id = ? AND c.guardian_id = ?
+                """,
+                (offer_id, guardian_id),
+            ).fetchone()
+            if offer is None:
+                raise ApiError("有効なキャンセル待ちオファーがありません。", 404)
+            notification_ids = _expire_waitlist_offers(connection)
+            offer = connection.execute(
+                """
+                SELECT o.status, o.dispatch_id, r.reservation_id
+                FROM waitlist_offers o
+                JOIN reservations r ON r.reservation_id = o.reservation_id
+                JOIN children c ON c.child_id = r.child_id
+                WHERE o.offer_id = ? AND c.guardian_id = ?
+                """,
+                (offer_id, guardian_id),
+            ).fetchone()
+            if offer["status"] != "pending":
+                connection.commit()
+                for next_offer_id in notification_ids:
+                    _send_waitlist_offer_email(
+                        app, app.config["DATABASE"], next_offer_id
+                    )
+                return error_response(
+                    "有効なキャンセル待ちオファーがありません。", 404
+                )
+
+            connection.execute(
+                """
+                UPDATE waitlist_offers
+                SET status = 'declined', responded_at = datetime('now', 'localtime')
+                WHERE offer_id = ? AND status = 'pending'
+                """,
+                (offer_id,),
+            )
+            connection.execute(
+                """
+                UPDATE reservations
+                SET status = 'waitlisted', hold_expires_at = NULL,
+                    updated_at = datetime('now', 'localtime')
+                WHERE reservation_id = ?
+                """,
+                (offer["reservation_id"],),
+            )
+            connection.execute(
+                "DELETE FROM reservation_hours WHERE reservation_id = ?",
+                (offer["reservation_id"],),
+            )
+            if offer["dispatch_id"] is not None:
+                next_offer_id = _advance_waitlist_dispatch(
+                    connection, offer["dispatch_id"]
+                )
+                if next_offer_id is not None:
+                    notification_ids.append(next_offer_id)
+            connection.commit()
+        except ApiError as error:
+            connection.rollback()
+            return error_response(str(error), error.status)
+        except Exception:
+            connection.rollback()
+            raise
+        for next_offer_id in notification_ids:
+            _send_waitlist_offer_email(app, app.config["DATABASE"], next_offer_id)
+        return jsonify(offer_id=offer_id, status="declined")
 
     @app.get("/api/availability/month")
     def monthly_availability() -> Response | tuple[Response, int]:
@@ -713,6 +996,17 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         connection = get_database()
         connection.execute("BEGIN IMMEDIATE")
         try:
+            expired_offer_ids = _expire_waitlist_offers(connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        for expired_offer_id in expired_offer_ids:
+            _send_waitlist_offer_email(
+                app, app.config["DATABASE"], expired_offer_id
+            )
+        connection.execute("BEGIN IMMEDIATE")
+        try:
             day_row = connection.execute(
                 "SELECT is_open FROM operating_days WHERE care_date = ?", (care_date,)
             ).fetchone()
@@ -720,11 +1014,19 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 raise ApiError("指定日は開所日ではありません。", 400)
 
             child = connection.execute(
-                "SELECT birth_date, karte_status FROM children WHERE child_id = ?",
+                """
+                SELECT birth_date, karte_status, guardian_id
+                FROM children WHERE child_id = ?
+                """,
                 (child_id,),
             ).fetchone()
             if child is None:
                 raise ApiError("児童が見つかりません。", 404)
+            guardian_id = session.get("guardian_id")
+            if not isinstance(guardian_id, int):
+                raise ApiError("ログインが必要です。", 401)
+            if child["guardian_id"] != guardian_id:
+                raise ApiError("自分の世帯に登録されている児童を選択してください。", 403)
             if child["karte_status"] != "approved":
                 raise ApiError("承認済みの児童カルテが必要です。", 409)
 
@@ -835,18 +1137,6 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 return error_response("予約結果をデータベースから取得できません。", 500)
 
             waitlisted = status == "waitlisted"
-            points_awarded = 0
-            priority_points = None
-            if waitlisted:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    points_awarded, priority_points = _award_waitlist_points(
-                        connection, child_id, reservation_id
-                    )
-                    connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
         except ApiError as error:
             connection.rollback()
             return error_response(str(error), error.status)
@@ -866,8 +1156,6 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     start_hour=start_hour,
                     end_hour=end_hour,
                     fee_yen=fee_yen,
-                    points_awarded=points_awarded,
-                    priority_points=priority_points,
                 ),
                 202,
             )
@@ -887,15 +1175,20 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
     @app.post("/api/holds/<int:reservation_id>/confirm")
     def confirm_hold(reservation_id: int) -> tuple[Response, int] | Response:
+        guardian_id = session.get("guardian_id")
+        if not isinstance(guardian_id, int):
+            return error_response("ログインが必要です。", 401)
         connection = get_database()
         connection.execute("BEGIN IMMEDIATE")
         try:
             reservation = connection.execute(
                 """
-                SELECT status, hold_expires_at FROM reservations
-                WHERE reservation_id = ?
+                SELECT r.status, r.hold_expires_at
+                FROM reservations r
+                JOIN children c ON c.child_id = r.child_id
+                WHERE r.reservation_id = ? AND c.guardian_id = ?
                 """,
-                (reservation_id,),
+                (reservation_id, guardian_id),
             ).fetchone()
             if reservation is None:
                 raise ApiError("予約が見つかりません。", 404)
@@ -932,34 +1225,39 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
     @app.delete("/api/holds/<int:reservation_id>")
     def cancel_hold(reservation_id: int) -> tuple[Response, int] | Response:
+        guardian_id = session.get("guardian_id")
+        if not isinstance(guardian_id, int):
+            return error_response("ログインが必要です。", 401)
         connection = get_database()
         connection.execute("BEGIN IMMEDIATE")
-        reservation = connection.execute(
-            """
-            SELECT status FROM reservations
-            WHERE reservation_id = ?
-              AND status IN ('held', 'confirmed', 'waitlisted')
-            """,
-            (reservation_id,),
-        ).fetchone()
-        if reservation is None:
-            connection.rollback()
-            return error_response("キャンセル可能な予約が見つかりません。", 404)
+        try:
+            notification_ids = _expire_waitlist_offers(connection)
+            reservation = connection.execute(
+                """
+                SELECT r.status FROM reservations r
+                JOIN children c ON c.child_id = r.child_id
+                WHERE r.reservation_id = ? AND c.guardian_id = ?
+                  AND r.status IN ('held', 'confirmed', 'waitlisted')
+                """,
+                (reservation_id, guardian_id),
+            ).fetchone()
+            if reservation is None:
+                raise ApiError("キャンセル可能な予約が見つかりません。", 404)
 
-        connection.execute(
-            """
-            UPDATE reservations
-            SET status = 'cancelled', hold_expires_at = NULL,
-                updated_at = datetime('now', 'localtime')
-            WHERE reservation_id = ?
-            """,
-            (reservation_id,),
-        )
-        connection.execute(
-            "DELETE FROM reservation_hours WHERE reservation_id = ?",
-            (reservation_id,),
-        )
-        connection.commit()
+            offer_id = _cancel_reservation_and_dispatch(connection, reservation_id)
+            if offer_id is not None:
+                notification_ids.append(offer_id)
+            connection.commit()
+        except ApiError as error:
+            connection.rollback()
+            return error_response(str(error), error.status)
+        except Exception:
+            connection.rollback()
+            raise
+        for notification_offer_id in notification_ids:
+            _send_waitlist_offer_email(
+                app, app.config["DATABASE"], notification_offer_id
+            )
         return jsonify(reservation_id=reservation_id, status="cancelled")
 
     return app
@@ -973,9 +1271,47 @@ def _integer(value: Any) -> int | None:
     return None
 
 
+def _record_points(
+    connection: sqlite3.Connection,
+    guardian_id: int,
+    delta: int,
+    reason: str,
+    reservation_id: int,
+) -> int:
+    if delta == 0:
+        row = connection.execute(
+            "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+            (guardian_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Guardian not found: {guardian_id}")
+        return row["priority_points"]
+
+    cursor = connection.execute(
+        "UPDATE guardians SET priority_points = priority_points + ? "
+        "WHERE guardian_id = ?",
+        (delta, guardian_id),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError(f"Guardian not found while updating points: {guardian_id}")
+    balance = connection.execute(
+        "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+        (guardian_id,),
+    ).fetchone()["priority_points"]
+    connection.execute(
+        """
+        INSERT INTO point_ledger (
+            guardian_id, delta, balance_after, reason, reservation_id
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (guardian_id, delta, balance, reason, reservation_id),
+    )
+    return balance
+
+
 def _award_waitlist_points(
-    connection: sqlite3.Connection, child_id: int, reservation_id: int
-) -> tuple[int, int]:
+    connection: sqlite3.Connection, reservation_id: int
+) -> None:
     setting = connection.execute(
         "SELECT value FROM settings WHERE key = 'waitlist_lose_points'"
     ).fetchone()
@@ -988,42 +1324,482 @@ def _award_waitlist_points(
     if points < 0:
         raise RuntimeError("waitlist_lose_points cannot be negative")
 
-    child = connection.execute(
-        "SELECT guardian_id FROM children WHERE child_id = ?", (child_id,)
+    reservation = connection.execute(
+        """
+        SELECT c.guardian_id
+        FROM reservations r
+        JOIN children c ON c.child_id = r.child_id
+        WHERE r.reservation_id = ?
+        """,
+        (reservation_id,),
     ).fetchone()
-    if child is None:
-        raise RuntimeError(f"Child not found while awarding points: {child_id}")
-
-    guardian_id = child["guardian_id"]
-    connection.execute(
-        "UPDATE guardians SET priority_points = priority_points + ? "
-        "WHERE guardian_id = ?",
-        (points, guardian_id),
+    if reservation is None:
+        raise RuntimeError(
+            f"Reservation not found while awarding waitlist points: {reservation_id}"
+        )
+    _record_points(
+        connection,
+        reservation["guardian_id"],
+        points,
+        "conflict_lose",
+        reservation_id,
     )
-    balance = connection.execute(
-        "SELECT priority_points FROM guardians WHERE guardian_id = ?",
-        (guardian_id,),
-    ).fetchone()
-    if balance is None:
-        raise RuntimeError(f"Guardian not found while awarding points: {guardian_id}")
 
-    if points:
+
+def _finish_waitlist_dispatch(
+    connection: sqlite3.Connection, dispatch_id: int, status: str
+) -> None:
+    cursor = connection.execute(
+        """
+        UPDATE waitlist_dispatches
+        SET status = ?, resolved_at = datetime('now', 'localtime')
+        WHERE dispatch_id = ? AND status = 'pending'
+        """,
+        (status, dispatch_id),
+    )
+    if cursor.rowcount != 1:
+        return
+    unoffered = connection.execute(
+        """
+        SELECT p.reservation_id
+        FROM waitlist_dispatch_participants p
+        JOIN reservations r ON r.reservation_id = p.reservation_id
+        WHERE p.dispatch_id = ? AND p.offered = 0 AND r.status = 'waitlisted'
+        """,
+        (dispatch_id,),
+    ).fetchall()
+    for participant in unoffered:
+        _award_waitlist_points(connection, participant["reservation_id"])
+
+
+def _reservation_fits(connection: sqlite3.Connection, reservation: sqlite3.Row) -> bool:
+    settings = {
+        row["key"]: row["value"]
+        for row in connection.execute(
+            """
+            SELECT key, value FROM settings
+            WHERE key IN ('max_children', 'staff_count')
+            """
+        ).fetchall()
+    }
+    if set(settings) != {"max_children", "staff_count"}:
+        raise RuntimeError("Reservation capacity settings are incomplete")
+    try:
+        max_children = float(settings["max_children"])
+        staff_count = min(float(settings["staff_count"]), 5.0)
+    except ValueError as error:
+        raise RuntimeError("Reservation capacity settings must be numeric") from error
+    if max_children < 0 or staff_count < 0:
+        raise RuntimeError("Reservation capacity settings cannot be negative")
+
+    for hour in range(reservation["start_hour"], reservation["end_hour"]):
+        load = connection.execute(
+            """
+            SELECT COUNT(*) AS children_count,
+                   COALESCE(SUM(r.staff_cost), 0.0) AS staff_used
+            FROM reservation_hours h
+            JOIN reservations r ON r.reservation_id = h.reservation_id
+            WHERE h.care_date = ? AND h.hour = ?
+              AND (r.status = 'confirmed'
+                   OR (r.status = 'held'
+                       AND r.hold_expires_at > datetime('now', 'localtime')))
+            """,
+            (reservation["care_date"], hour),
+        ).fetchone()
+        if (
+            load["children_count"] >= max_children
+            or load["staff_used"] + reservation["staff_cost"] > staff_count + 0.001
+        ):
+            return False
+    return True
+
+
+def _advance_waitlist_dispatch(
+    connection: sqlite3.Connection, dispatch_id: int
+) -> int | None:
+    dispatch = connection.execute(
+        """
+        SELECT * FROM waitlist_dispatches
+        WHERE dispatch_id = ? AND status = 'pending'
+        """,
+        (dispatch_id,),
+    ).fetchone()
+    if dispatch is None:
+        return None
+
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO waitlist_dispatch_participants (
+            dispatch_id, reservation_id
+        )
+        SELECT ?, r.reservation_id
+        FROM reservations r
+        WHERE r.status = 'waitlisted' AND r.care_date = ?
+          AND r.start_hour < ? AND r.end_hour > ?
+        """,
+        (
+            dispatch_id,
+            dispatch["care_date"],
+            dispatch["end_hour"],
+            dispatch["start_hour"],
+        ),
+    )
+    candidates = connection.execute(
+        """
+        SELECT r.reservation_id, r.care_date, r.start_hour, r.end_hour,
+               r.staff_cost, r.status
+        FROM waitlist_dispatch_participants p
+        JOIN reservations r ON r.reservation_id = p.reservation_id
+        JOIN reservation_attempts a ON a.reservation_id = r.reservation_id
+        JOIN children c ON c.child_id = r.child_id
+        JOIN guardians g ON g.guardian_id = c.guardian_id
+        WHERE p.dispatch_id = ? AND p.offered = 0
+          AND r.status = 'waitlisted'
+          AND NOT EXISTS (
+              SELECT 1 FROM waitlist_offers o
+              WHERE o.reservation_id = r.reservation_id AND o.status = 'pending'
+          )
+        ORDER BY g.priority_points DESC, a.attempted_at_ms ASC,
+                 r.reservation_id ASC
+        """,
+        (dispatch_id,),
+    ).fetchall()
+
+    response_setting = connection.execute(
+        "SELECT value FROM settings WHERE key = 'offer_response_minutes'"
+    ).fetchone()
+    if response_setting is None:
+        raise RuntimeError("offer_response_minutes is missing from settings")
+    try:
+        response_minutes = int(response_setting["value"])
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("offer_response_minutes must be an integer") from error
+    if response_minutes <= 0:
+        raise RuntimeError("offer_response_minutes must be positive")
+
+    for candidate in candidates:
+        if not _reservation_fits(connection, candidate):
+            continue
+        respond_by = datetime.now() + timedelta(minutes=response_minutes)
+        respond_by_text = respond_by.strftime("%Y-%m-%d %H:%M:%S")
+        connection.execute("SAVEPOINT waitlist_offer_candidate")
+        try:
+            connection.execute(
+                """
+                UPDATE reservations
+                SET status = 'held', hold_expires_at = ?,
+                    updated_at = datetime('now', 'localtime')
+                WHERE reservation_id = ? AND status = 'waitlisted'
+                """,
+                (respond_by_text, candidate["reservation_id"]),
+            )
+            connection.executemany(
+                """
+                INSERT INTO reservation_hours (reservation_id, care_date, hour)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (candidate["reservation_id"], candidate["care_date"], hour)
+                    for hour in range(candidate["start_hour"], candidate["end_hour"])
+                ),
+            )
+        except sqlite3.IntegrityError:
+            connection.execute("ROLLBACK TO waitlist_offer_candidate")
+            connection.execute("RELEASE waitlist_offer_candidate")
+            continue
+        connection.execute("RELEASE waitlist_offer_candidate")
+
+        cursor = connection.execute(
+            """
+            INSERT INTO waitlist_offers (
+                reservation_id, offered_at, respond_by, status, dispatch_id
+            ) VALUES (?, datetime('now', 'localtime'), ?, 'pending', ?)
+            """,
+            (candidate["reservation_id"], respond_by_text, dispatch_id),
+        )
         connection.execute(
             """
-            INSERT INTO point_ledger (
-                guardian_id, delta, balance_after, reason, reservation_id
-            ) VALUES (?, ?, ?, 'conflict_lose', ?)
+            UPDATE waitlist_dispatch_participants
+            SET offered = 1
+            WHERE dispatch_id = ? AND reservation_id = ?
             """,
-            (
-                guardian_id,
-                points,
-                balance["priority_points"],
-                reservation_id,
-            ),
+            (dispatch_id, candidate["reservation_id"]),
         )
-    return points, balance["priority_points"]
+        offer_id = cursor.lastrowid
+        guardian = connection.execute(
+            """
+            SELECT g.guardian_id, g.email, c.name AS child_name
+            FROM reservations r
+            JOIN children c ON c.child_id = r.child_id
+            JOIN guardians g ON g.guardian_id = c.guardian_id
+            WHERE r.reservation_id = ?
+            """,
+            (candidate["reservation_id"],),
+        ).fetchone()
+        body = (
+            f"{guardian['child_name']}さんのキャンセル待ち予約に空き枠のオファーが届きました。"
+            f"{respond_by_text}までにマイページから受諾または辞退してください。"
+        )
+        connection.execute(
+            """
+            INSERT INTO notifications (
+                guardian_id, channel, type, body, related_offer_id
+            ) VALUES (?, 'email', 'waitlist_offer', ?, ?)
+            """,
+            (guardian["guardian_id"], body, offer_id),
+        )
+        return offer_id
+
+    _finish_waitlist_dispatch(connection, dispatch_id, "exhausted")
+    return None
+
+
+def _start_waitlist_dispatch(
+    connection: sqlite3.Connection, cancelled_reservation_id: int
+) -> int | None:
+    cancelled = connection.execute(
+        """
+        SELECT care_date, start_hour, end_hour
+        FROM reservations WHERE reservation_id = ?
+        """,
+        (cancelled_reservation_id,),
+    ).fetchone()
+    if cancelled is None:
+        raise RuntimeError(
+            f"Cancelled reservation not found: {cancelled_reservation_id}"
+        )
+    cursor = connection.execute(
+        """
+        INSERT INTO waitlist_dispatches (
+            cancelled_reservation_id, care_date, start_hour, end_hour
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (
+            cancelled_reservation_id,
+            cancelled["care_date"],
+            cancelled["start_hour"],
+            cancelled["end_hour"],
+        ),
+    )
+    dispatch_id = cursor.lastrowid
+    participants = connection.execute(
+        """
+        SELECT reservation_id
+        FROM reservations
+        WHERE status = 'waitlisted' AND care_date = ?
+          AND start_hour < ? AND end_hour > ?
+        """,
+        (
+            cancelled["care_date"],
+            cancelled["end_hour"],
+            cancelled["start_hour"],
+        ),
+    ).fetchall()
+    connection.executemany(
+        """
+        INSERT INTO waitlist_dispatch_participants (dispatch_id, reservation_id)
+        VALUES (?, ?)
+        """,
+        ((dispatch_id, row["reservation_id"]) for row in participants),
+    )
+    return _advance_waitlist_dispatch(connection, dispatch_id)
+
+
+def _cancel_reservation_and_dispatch(
+    connection: sqlite3.Connection, reservation_id: int
+) -> int | None:
+    reservation = connection.execute(
+        """
+        SELECT care_date, start_hour, end_hour, status
+        FROM reservations WHERE reservation_id = ?
+        """,
+        (reservation_id,),
+    ).fetchone()
+    if reservation is None or reservation["status"] not in {
+        "held",
+        "confirmed",
+        "waitlisted",
+    }:
+        raise ApiError("キャンセル可能な予約が見つかりません。", 404)
+
+    pending_offer = connection.execute(
+        """
+        SELECT offer_id, dispatch_id FROM waitlist_offers
+        WHERE reservation_id = ? AND status = 'pending'
+        """,
+        (reservation_id,),
+    ).fetchone()
+    connection.execute(
+        """
+        UPDATE reservations
+        SET status = 'cancelled', hold_expires_at = NULL,
+            updated_at = datetime('now', 'localtime')
+        WHERE reservation_id = ?
+        """,
+        (reservation_id,),
+    )
+    connection.execute(
+        "DELETE FROM reservation_hours WHERE reservation_id = ?",
+        (reservation_id,),
+    )
+
+    if pending_offer is not None:
+        connection.execute(
+            """
+            UPDATE waitlist_offers
+            SET status = 'declined', responded_at = datetime('now', 'localtime')
+            WHERE offer_id = ?
+            """,
+            (pending_offer["offer_id"],),
+        )
+        if pending_offer["dispatch_id"] is not None:
+            return _advance_waitlist_dispatch(
+                connection, pending_offer["dispatch_id"]
+            )
+        return None
+
+    if reservation["status"] == "waitlisted":
+        return None
+    return _start_waitlist_dispatch(connection, reservation_id)
+
+
+def _expire_waitlist_offers(connection: sqlite3.Connection) -> list[int]:
+    notifications: list[int] = []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    expired = connection.execute(
+        """
+        SELECT offer_id, reservation_id, dispatch_id
+        FROM waitlist_offers
+        WHERE status = 'pending' AND respond_by <= ?
+        ORDER BY respond_by, offer_id
+        """,
+        (now,),
+    ).fetchall()
+    for offer in expired:
+        connection.execute(
+            """
+            UPDATE waitlist_offers
+            SET status = 'expired', responded_at = datetime('now', 'localtime')
+            WHERE offer_id = ? AND status = 'pending'
+            """,
+            (offer["offer_id"],),
+        )
+        connection.execute(
+            """
+            UPDATE reservations
+            SET status = 'waitlisted', hold_expires_at = NULL,
+                updated_at = datetime('now', 'localtime')
+            WHERE reservation_id = ? AND status = 'held'
+            """,
+            (offer["reservation_id"],),
+        )
+        connection.execute(
+            "DELETE FROM reservation_hours WHERE reservation_id = ?",
+            (offer["reservation_id"],),
+        )
+        if offer["dispatch_id"] is not None:
+            notification_id = _advance_waitlist_dispatch(
+                connection, offer["dispatch_id"]
+            )
+            if notification_id is not None:
+                notifications.append(notification_id)
+    return notifications
+
+
+def _send_waitlist_offer_email(
+    app: Flask, database_path: str, offer_id: int
+) -> None:
+    host = os.environ.get("HOIKU_SMTP_HOST")
+    sender = os.environ.get("HOIKU_SMTP_FROM")
+    if not host or not sender:
+        app.logger.error(
+            "キャンセル待ちオファーのメールを送信できません。"
+            "HOIKU_SMTP_HOST と HOIKU_SMTP_FROM を設定してください。"
+        )
+        return
+
+    with closing(sqlite3.connect(database_path, timeout=10)) as connection:
+        connection.row_factory = sqlite3.Row
+        notification = connection.execute(
+            """
+            SELECT n.notification_id, n.body, g.email, o.respond_by
+            FROM notifications n
+            JOIN guardians g ON g.guardian_id = n.guardian_id
+            JOIN waitlist_offers o ON o.offer_id = n.related_offer_id
+            WHERE o.offer_id = ? AND n.type = 'waitlist_offer'
+            ORDER BY n.notification_id DESC LIMIT 1
+            """,
+            (offer_id,),
+        ).fetchone()
+    if notification is None:
+        raise RuntimeError(f"Email notification not found for offer {offer_id}")
+
+    message = EmailMessage()
+    message["Subject"] = "キャンセル待ちオファーのお知らせ"
+    message["From"] = sender
+    message["To"] = notification["email"]
+    base_url = os.environ.get("HOIKU_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+    message.set_content(
+        f"{notification['body']}\n\n"
+        f"回答期限: {notification['respond_by']}\n"
+        f"マイページ: {base_url}/mypage\n"
+    )
+
+    try:
+        port = int(os.environ.get("HOIKU_SMTP_PORT", "587"))
+        username = os.environ.get("HOIKU_SMTP_USER")
+        password = os.environ.get("HOIKU_SMTP_PASSWORD")
+        use_starttls = os.environ.get("HOIKU_SMTP_STARTTLS", "1") == "1"
+        with smtplib.SMTP(host, port, timeout=10) as smtp:
+            if use_starttls:
+                smtp.starttls(context=ssl.create_default_context())
+            if username:
+                smtp.login(username, password or "")
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException, ValueError):
+        app.logger.exception("キャンセル待ちオファーメールの送信に失敗しました")
+        return
+    with closing(sqlite3.connect(database_path, timeout=10)) as connection:
+        connection.execute(
+            """
+            UPDATE notifications SET sent_at = datetime('now', 'localtime')
+            WHERE notification_id = ?
+            """,
+            (notification["notification_id"],),
+        )
+        connection.commit()
+
+
+def _waitlist_expiry_worker(app: Flask) -> None:
+    while True:
+        time.sleep(15)
+        with closing(
+            sqlite3.connect(
+                app.config["DATABASE"], timeout=10, isolation_level=None
+            )
+        ) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                notification_ids = _expire_waitlist_offers(connection)
+                connection.commit()
+            except (sqlite3.Error, RuntimeError):
+                connection.rollback()
+                app.logger.exception("キャンセル待ちオファーの期限処理に失敗しました")
+                continue
+        for offer_id in notification_ids:
+            try:
+                _send_waitlist_offer_email(app, app.config["DATABASE"], offer_id)
+            except (sqlite3.Error, RuntimeError):
+                app.logger.exception("次のキャンセル待ちオファーを通知できませんでした")
 
 
 if __name__ == "__main__":
     app = create_app()
+    threading.Thread(
+        target=_waitlist_expiry_worker,
+        args=(app,),
+        name="waitlist-expiry-worker",
+        daemon=True,
+    ).start()
     app.run(host="127.0.0.1", port=5000, debug=False)
