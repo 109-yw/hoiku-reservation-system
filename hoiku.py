@@ -789,9 +789,44 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             hours = end_hour - start_hour
             fee_yen = age_class["hourly_fee_yen"] * hours
 
-            timeout_row = connection.execute(
-                "SELECT value FROM settings WHERE key = 'hold_timeout_sec'"
+                        # Python側の書き込みロックを解除してから、Cに新規予約を任せる。
+            connection.rollback()
+
+            try:
+                result = subprocess.run(
+                    [
+                        str(ROOT / "hoiku_cli.exe"),
+                        str(Path(app.config["DATABASE"]).resolve()),
+                        str(child_id),
+                        care_date,
+                        str(start_hour),
+                        str(end_hour),
+                        str(time.time_ns() // 1_000_000),
+                    ],
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError:
+                app.logger.exception("hoiku_cli.exe の起動に失敗しました")
+                return error_response("予約プログラムを起動できませんでした。", 500)
+
+            if result.returncode != 0:
+                app.logger.error("Cの予約処理に失敗しました: %s", result.stderr.strip())
+                return error_response("予約枠を確保できませんでした。", 409)
+
+            status, reservation_id_text = result.stdout.strip().split()
+            reservation_id = int(reservation_id_text)
+
+            reservation = connection.execute(
+                """
+                SELECT hold_expires_at, fee_yen
+                FROM reservations
+                WHERE reservation_id = ?
+                """,
+                (reservation_id,),
             ).fetchone()
+<<<<<<< HEAD
             if timeout_row is None:
                 raise RuntimeError("hold_timeout_sec is missing from settings")
             hold_expires_at = (
@@ -884,6 +919,21 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                         for hour in range(start_hour, end_hour)
                     ),
                 )
+=======
+
+            return (
+                jsonify(
+                    reservation_id=reservation_id,
+                    status=status,
+                    course=course,
+                    start_hour=start_hour,
+                    end_hour=end_hour,
+                    hold_expires_at=reservation["hold_expires_at"],
+                    fee_yen=reservation["fee_yen"],
+                ),
+                201,
+            )
+>>>>>>> 8b44250435324c58956380edc3412ecc65e174a9
             connection.commit()
         except ApiError as error:
             connection.rollback()
