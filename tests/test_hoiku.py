@@ -246,6 +246,91 @@ class ReservationApiTests(unittest.TestCase):
         self.assertEqual(confirmed.status_code, 200)
         self.assertEqual(confirmed.json["status"], "confirmed")
 
+    def test_two_siblings_can_be_reserved_for_the_same_course(self) -> None:
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            guardian_id, child_ids = connection.execute(
+                """
+                SELECT guardian_id, GROUP_CONCAT(child_id)
+                FROM children
+                WHERE karte_status = 'approved'
+                GROUP BY guardian_id
+                HAVING COUNT(*) >= 2
+                ORDER BY guardian_id
+                LIMIT 1
+                """
+            ).fetchone()
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = guardian_id
+
+        reservation_ids = []
+        for child_id in map(int, child_ids.split(",")):
+            response = self.client.post(
+                "/api/holds",
+                json={
+                    "child_id": child_id,
+                    "care_date": "2026-11-11",
+                    "course": "morning",
+                },
+            )
+            self.assertEqual(response.status_code, 201)
+            reservation_ids.append(response.json["reservation_id"])
+
+        for reservation_id in reservation_ids:
+            confirmed = self.client.post(
+                f"/api/holds/{reservation_id}/confirm"
+            )
+            self.assertEqual(confirmed.status_code, 200)
+
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            statuses = connection.execute(
+                """
+                SELECT status FROM reservations
+                WHERE reservation_id IN (?, ?)
+                ORDER BY reservation_id
+                """,
+                reservation_ids,
+            ).fetchall()
+        self.assertEqual([row[0] for row in statuses], ["confirmed", "confirmed"])
+
+    def test_sibling_exceeding_remaining_capacity_joins_waitlist(self) -> None:
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            guardian_id, child_ids = connection.execute(
+                """
+                SELECT guardian_id, GROUP_CONCAT(child_id)
+                FROM children
+                WHERE karte_status = 'approved'
+                GROUP BY guardian_id
+                HAVING COUNT(*) >= 2
+                ORDER BY guardian_id
+                LIMIT 1
+                """
+            ).fetchone()
+            connection.execute(
+                "UPDATE settings SET value = '1' WHERE key = 'max_children'"
+            )
+            connection.commit()
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = guardian_id
+
+        results = []
+        for child_id in map(int, child_ids.split(",")):
+            results.append(
+                self.client.post(
+                    "/api/holds",
+                    json={
+                        "child_id": child_id,
+                        "care_date": "2026-11-11",
+                        "course": "morning",
+                    },
+                )
+            )
+
+        self.assertEqual([response.status_code for response in results], [201, 202])
+        self.assertEqual(
+            [response.json["status"] for response in results],
+            ["held", "waitlisted"],
+        )
+
     def test_cancelled_slot_offers_to_highest_points_and_rewards_unoffered(self) -> None:
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
             source_guardian_id = connection.execute(
