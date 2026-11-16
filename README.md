@@ -26,6 +26,9 @@ python hoiku.py
 
 予約カレンダーは月別APIから開所日・空き状況を取得し、日付選択後に仮押さえと確定を行います。予約画面の児童ID入力欄は、承認済み児童の `child_id` を入力してください。
 
+定員または保育士配置の上限超過で予約枠を確保できなかった場合、`settings.waitlist_lose_points` のポイントを児童の保護者に付与します。保護者の残高は `guardians.priority_points`、付与履歴は `point_ledger` に保存されます。Python APIでは予約エラーとともに付与数・更新後残高を返します。
+初期保有ポイントは0で、初期設定の `waitlist_lose_points` は1です。対象の予約に失敗するたびに1ポイント加算し、ポイントの上限は設けません。
+
 仮押さえのJSON例:
 
 ```json
@@ -48,6 +51,7 @@ C言語の予約処理は `c/hoiku.c`、公開関数の宣言は `c/hoiku.h` に
 
 - **同時予約の排他制御:** 予約の確認から登録まで `BEGIN IMMEDIATE` トランザクションで直列化します。SQLiteが使用中の場合は最大10秒待ちます。成功時の `COMMIT`、失敗時の `ROLLBACK` でトランザクションとロックを終了します。
 - **予約とキャンセル待ち:** `hoiku_reserve` は開所日、予約時間、児童の承認状態を確認して予約します。予約時間は9時から17時まで、2時間以上で指定できます。利用可能なら仮押さえ（`held`）と時間枠を登録し、上限を超える場合は時間枠を確保せずキャンセル待ち（`waitlisted`）に登録します。
+- **優先ポイント付与:** 定員または保育士配置の上限超過でキャンセル待ちになった場合、`settings.waitlist_lose_points` のポイントを保護者に付与し、`guardians.priority_points` と `point_ledger` に保存します。
 - **年齢別リソース計算:** 予約日の生年月日から児童の月齢を計算し、`age_classes` から料金と `staff_cost` を取得します。予約する各1時間枠について、利用中の児童数と保育士コストを合計します。人数は `settings.max_children`、保育士コストは `settings.staff_count` と5人分のうち小さい方を上限に判定します。
 - **開所日判定:** `operating_days.csv` の `care_date` と `is_open` を取り込んだ `operating_days` テーブルを参照します。`is_open=1` の日のみ予約でき、`is_open=0` の休業日やCSVにない日付は予約できません。開所日のCSVには定員列がないため、人数・保育士の上限は `settings` テーブルから取得します。
 - **キャンセル待ちの優先順位:** `hoiku_get_waitlist_order` は保護者の `priority_points` が多い順、同じポイントなら受付時刻が早い順に予約IDを返します。受付時刻は `attempted_at_ms` 引数でUnix時刻のミリ秒として渡します。

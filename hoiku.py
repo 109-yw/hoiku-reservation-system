@@ -844,6 +844,28 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             return error_response(str(error), error.status)
         except sqlite3.IntegrityError as error:
             connection.rollback()
+            if str(error) in {"定員超過", "保育士リソース超過"}:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    points_awarded, priority_points = _award_waitlist_points(
+                        connection, child_id
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                message = (
+                    "予約枠が定員または保育士配置の上限に達しています。"
+                    f"優先ポイントを{points_awarded}ポイント付与しました。"
+                )
+                return (
+                    jsonify(
+                        error=message,
+                        points_awarded=points_awarded,
+                        priority_points=priority_points,
+                    ),
+                    409,
+                )
             return error_response(f"予約枠を確保できませんでした: {error}", 409)
         except Exception:
             connection.rollback()
@@ -947,6 +969,52 @@ def _integer(value: Any) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _award_waitlist_points(
+    connection: sqlite3.Connection, child_id: int
+) -> tuple[int, int]:
+    setting = connection.execute(
+        "SELECT value FROM settings WHERE key = 'waitlist_lose_points'"
+    ).fetchone()
+    if setting is None:
+        raise RuntimeError("waitlist_lose_points is missing from settings")
+    try:
+        points = int(setting["value"])
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("waitlist_lose_points must be an integer") from error
+    if points < 0:
+        raise RuntimeError("waitlist_lose_points cannot be negative")
+
+    child = connection.execute(
+        "SELECT guardian_id FROM children WHERE child_id = ?", (child_id,)
+    ).fetchone()
+    if child is None:
+        raise RuntimeError(f"Child not found while awarding points: {child_id}")
+
+    guardian_id = child["guardian_id"]
+    connection.execute(
+        "UPDATE guardians SET priority_points = priority_points + ? "
+        "WHERE guardian_id = ?",
+        (points, guardian_id),
+    )
+    balance = connection.execute(
+        "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+        (guardian_id,),
+    ).fetchone()
+    if balance is None:
+        raise RuntimeError(f"Guardian not found while awarding points: {guardian_id}")
+
+    if points:
+        connection.execute(
+            """
+            INSERT INTO point_ledger (
+                guardian_id, delta, balance_after, reason, reservation_id
+            ) VALUES (?, ?, ?, 'conflict_lose', NULL)
+            """,
+            (guardian_id, points, balance["priority_points"]),
+        )
+    return points, balance["priority_points"]
 
 
 if __name__ == "__main__":

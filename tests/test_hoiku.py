@@ -236,6 +236,88 @@ class ReservationApiTests(unittest.TestCase):
         self.assertEqual(confirmed.status_code, 200)
         self.assertEqual(confirmed.json["status"], "confirmed")
 
+    def test_capacity_failure_awards_and_persists_priority_points(self) -> None:
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            reserved_guardian_id = connection.execute(
+                "SELECT guardian_id FROM children WHERE child_id = 1"
+            ).fetchone()[0]
+            other_child_id = connection.execute(
+                """
+                SELECT child_id FROM children
+                WHERE guardian_id != ?
+                ORDER BY child_id LIMIT 1
+                """,
+                (reserved_guardian_id,),
+            ).fetchone()[0]
+            guardian_id = connection.execute(
+                "SELECT guardian_id FROM children WHERE child_id = ?",
+                (other_child_id,),
+            ).fetchone()[0]
+            original_points = connection.execute(
+                "SELECT priority_points FROM guardians WHERE guardian_id = ?",
+                (guardian_id,),
+            ).fetchone()[0]
+            self.assertEqual(original_points, 0)
+            connection.execute(
+                "UPDATE settings SET value = '1' WHERE key = 'max_children'"
+            )
+            connection.commit()
+
+        accepted = self.client.post(
+            "/api/holds",
+            json={
+                "child_id": 1,
+                "care_date": "2026-11-11",
+                "course": "morning",
+            },
+        )
+        rejected = self.client.post(
+            "/api/holds",
+            json={
+                "child_id": other_child_id,
+                "care_date": "2026-11-11",
+                "course": "morning",
+            },
+        )
+        rejected_again = self.client.post(
+            "/api/holds",
+            json={
+                "child_id": other_child_id,
+                "care_date": "2026-11-11",
+                "course": "morning",
+            },
+        )
+
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(rejected.status_code, 409)
+        self.assertEqual(rejected.json["points_awarded"], 1)
+        self.assertEqual(rejected.json["priority_points"], 1)
+        self.assertEqual(rejected_again.status_code, 409)
+        self.assertEqual(rejected_again.json["points_awarded"], 1)
+        self.assertEqual(rejected_again.json["priority_points"], 2)
+        with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
+            result = connection.execute(
+                """
+                SELECT g.priority_points, l.delta, l.balance_after,
+                       l.reason, l.reservation_id
+                FROM guardians g
+                JOIN point_ledger l ON l.guardian_id = g.guardian_id
+                WHERE g.guardian_id = ?
+                ORDER BY l.ledger_id DESC LIMIT 1
+                """,
+                (guardian_id,),
+            ).fetchone()
+
+        self.assertEqual(
+            result,
+            (2, 1, 2, "conflict_lose", None),
+        )
+        with self.client.session_transaction() as browser_session:
+            browser_session["guardian_id"] = guardian_id
+        mypage = self.client.get("/mypage")
+        self.assertIn(b"2 \xe3\x83\x9d\xe3\x82\xa4\xe3\x83\xb3\xe3\x83\x88", mypage.data)
+        mypage.close()
+
     def test_afternoon_course_uses_fixed_hours(self) -> None:
         response = self.client.post(
             "/api/holds",

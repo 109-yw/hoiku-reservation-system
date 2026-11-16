@@ -15,7 +15,7 @@ CREATE TABLE settings (
 );
 INSERT INTO settings (key, value, description) VALUES
   ('hold_timeout_sec',          '600',  '仮押さえのタイムアウト秒数（仮値）'),
-  ('waitlist_lose_points',      '1',    '同時予約で優先されなかった側に付与するポイント'),
+  ('waitlist_lose_points',      '1',    '定員または保育士上限超過時に付与する優先ポイント'),
   ('no_show_grace_minutes',     '60',   '開始からこの分数以内にチェックインが無ければ無断キャンセル'),
   ('no_show_penalty_points',    '-5',   '無断キャンセル時のポイント増減（仮値・変更予定）'),
   ('late_pickup_point_per_hour','-1',   '延滞1時間ごとのポイント増減'),
