@@ -189,6 +189,22 @@ input, select {
     padding: 15px;
 }
 
+.reservation-result {
+    margin-top: 12px;
+    padding: 14px;
+    border: 1px solid #c5d3dd;
+    border-radius: 8px;
+    background: #f7fbfd;
+}
+
+.reservation-result p {
+    margin: 0 0 10px;
+}
+
+.reservation-result button {
+    margin: 4px 8px 0 0;
+}
+
 .back {
     display: block;
     text-align: center;
@@ -251,8 +267,7 @@ input, select {
 
         </form>
         <p id="reservationMessage" class="message" aria-live="polite"></p>
-        <button id="confirmButton" type="button" hidden>予約を確定</button>
-        <button id="cancelButton" type="button" hidden>仮押さえを取消</button>
+        <div id="reservationResults" aria-live="polite"></div>
 </div>
 
 
@@ -269,8 +284,8 @@ today.setHours(0, 0, 0, 0);
 let currentYear = today.getFullYear();
 let currentMonth = today.getMonth();
 let selectedDate = null;
-let currentHoldId = null;
-let reservationConfirmed = false;
+let reservationsInProgress = false;
+let reservationResults = [];
 let monthDays = new Map();
 let calendarRequestId = 0;
 
@@ -350,7 +365,7 @@ async function renderCalendar() {
         btn.appendChild(mark);
 
         if (date < today || !dayInfo || status === "closed" || status === "full"
-                || currentHoldId !== null) {
+                || hasPendingReservations() || reservationsInProgress) {
             btn.disabled = true;
         } else {
             btn.onclick = () => selectDate(dateKey, btn);
@@ -362,7 +377,7 @@ async function renderCalendar() {
 
 // 月を切り替える
 function changeMonth(value) {
-    if (currentHoldId !== null) return;
+    if (hasPendingReservations() || reservationsInProgress) return;
     const date = new Date(currentYear, currentMonth + value, 1);
     currentYear = date.getFullYear();
     currentMonth = date.getMonth();
@@ -371,6 +386,8 @@ function changeMonth(value) {
     document.getElementById("formArea").style.display = "none";
     document.getElementById("reservationForm").reset();
     document.getElementById("reservationMessage").textContent = "";
+    document.getElementById("reservationResults").replaceChildren();
+    reservationResults = [];
 
     renderCalendar();
 }
@@ -383,12 +400,10 @@ function selectDate(dateKey, button) {
 
     button.classList.add("selected");
     selectedDate = dateKey;
-    currentHoldId = null;
-    reservationConfirmed = false;
     document.getElementById("reservationForm").reset();
     document.getElementById("reservationMessage").textContent = "";
-    document.getElementById("confirmButton").hidden = true;
-    document.getElementById("cancelButton").hidden = true;
+    document.getElementById("reservationResults").replaceChildren();
+    reservationResults = [];
 
     document.getElementById("selectedDate").textContent =
         new Date(`${dateKey}T00:00:00`).toLocaleDateString("ja-JP") + " の予約";
@@ -429,73 +444,123 @@ async function loadChildren() {
 
 document.getElementById("reservationForm").onsubmit = async function(e) {
     e.preventDefault();
-    if (!selectedDate || currentHoldId !== null || reservationConfirmed) return;
+    if (!selectedDate || reservationsInProgress || hasPendingReservations()) return;
 
     const selectedChildren = Array.from(
         document.querySelectorAll('input[name="childId"]:checked')
     );
-    if (selectedChildren.length !== 1) {
+    if (selectedChildren.length === 0) {
         const errorMessage = document.getElementById("reservationMessage");
-        errorMessage.textContent = "お子様を1人選択してください。";
+        errorMessage.textContent = "予約するお子様を選択してください。";
         errorMessage.classList.add("error");
         return;
     }
 
     const message = document.getElementById("reservationMessage");
     message.classList.remove("error");
-    message.textContent = "仮押さえを作成しています。";
+    message.textContent = "選択したお子様の予約を順番に作成しています。";
+    reservationsInProgress = true;
+    const submitButton = document.querySelector("#reservationForm button[type='submit']");
+    submitButton.disabled = true;
+    reservationResults = [];
 
     try {
-        const response = await fetch("/api/holds", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({
-                child_id: Number(selectedChildren[0].value),
-                care_date: selectedDate,
-                course: document.getElementById("time").value
-            })
-        });
-        const result = await response.json();
-        if (!response.ok) {
-            throw new Error(result.error || "仮押さえを作成できませんでした。");
+        for (const checkbox of selectedChildren) {
+            const childName = checkbox.parentElement.textContent.trim();
+            try {
+                const response = await fetch("/api/holds", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        child_id: Number(checkbox.value),
+                        care_date: selectedDate,
+                        course: document.getElementById("time").value
+                    })
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || "予約を作成できませんでした。");
+                }
+                reservationResults.push({
+                    childName,
+                    reservationId: result.reservation_id,
+                    status: result.status,
+                    feeYen: result.fee_yen,
+                    error: null
+                });
+            } catch (error) {
+                reservationResults.push({
+                    childName,
+                    status: "error",
+                    error: error.message || "予約を作成できませんでした。"
+                });
+            }
         }
-        currentHoldId = result.reservation_id;
-        if (result.status === "waitlisted") {
-            message.textContent =
-                "キャンセル待ちに登録しました。オファーが届いた場合はメールでお知らせします。";
-            document.getElementById("confirmButton").hidden = true;
-            document.getElementById("cancelButton").hidden = false;
-            document.getElementById("cancelButton").textContent = "キャンセル待ちを取り消す";
-            renderCalendar();
-            return;
-        }
+        renderReservationResults();
+        const heldCount = reservationResults.filter(item => item.status === "held").length;
+        const waitlistedCount = reservationResults.filter(item => item.status === "waitlisted").length;
+        const errorCount = reservationResults.filter(item => item.status === "error").length;
         message.textContent =
-            `仮押さえしました。料金: ${result.fee_yen.toLocaleString()}円。内容を確認して確定してください。`;
-        document.getElementById("confirmButton").hidden = false;
-        document.getElementById("cancelButton").hidden = false;
-        document.getElementById("cancelButton").textContent = "仮押さえを取消";
-        renderCalendar();
-    } catch (error) {
-        message.textContent =
-            error.message || "仮押さえを作成できませんでした。";
-        message.classList.add("error");
+            `処理結果：仮押さえ ${heldCount}人、キャンセル待ち ${waitlistedCount}人、エラー ${errorCount}人。` +
+            (heldCount > 0 ? "仮押さえごとに予約を確定してください。" : "");
+    } finally {
+        reservationsInProgress = false;
+        submitButton.disabled = false;
     }
+    renderCalendar();
 };
 
-document.getElementById("confirmButton").onclick = async function() {
-    if (currentHoldId === null) return;
-    await updateHold(`/api/holds/${currentHoldId}/confirm`, "POST", "予約を確定しました。");
-};
+function hasPendingReservations() {
+    return reservationResults.some(item =>
+        item.status === "held" || item.status === "waitlisted"
+    );
+}
 
-document.getElementById("cancelButton").onclick = async function() {
-    if (currentHoldId === null) return;
-    await updateHold(`/api/holds/${currentHoldId}`, "DELETE", "予約をキャンセルしました。");
-};
+function renderReservationResults() {
+    const container = document.getElementById("reservationResults");
+    container.replaceChildren();
 
-async function updateHold(url, method, successMessage) {
-    const message = document.getElementById("reservationMessage");
-    message.classList.remove("error");
-    message.textContent = "予約情報を更新しています。";
+    reservationResults.forEach((item, index) => {
+        const card = document.createElement("div");
+        card.className = "reservation-result";
+        const details = document.createElement("p");
+        details.textContent = `${item.childName}：${
+            item.status === "held" ? `仮押さえ中（${item.feeYen.toLocaleString()}円）` :
+            item.status === "waitlisted" ? "キャンセル待ち登録済み" :
+            item.status === "confirmed" ? "予約確定済み" :
+            item.status === "cancelled" ? "キャンセル済み" :
+            `エラー（${item.error}）`
+        }`;
+        card.appendChild(details);
+
+        if (item.status === "held") {
+            const confirmButton = document.createElement("button");
+            confirmButton.type = "button";
+            confirmButton.textContent = "この予約を確定";
+            confirmButton.onclick = () => updateReservation(index, "confirm");
+            const cancelButton = document.createElement("button");
+            cancelButton.type = "button";
+            cancelButton.textContent = "仮押さえを取消";
+            cancelButton.onclick = () => updateReservation(index, "cancel");
+            card.append(confirmButton, cancelButton);
+        } else if (item.status === "waitlisted") {
+            const cancelButton = document.createElement("button");
+            cancelButton.type = "button";
+            cancelButton.textContent = "キャンセル待ちを取消";
+            cancelButton.onclick = () => updateReservation(index, "cancel");
+            card.appendChild(cancelButton);
+        }
+        container.appendChild(card);
+    });
+}
+
+async function updateReservation(index, action) {
+    const item = reservationResults[index];
+    if (!item || !item.reservationId) return;
+    const url = action === "confirm"
+        ? `/api/holds/${item.reservationId}/confirm`
+        : `/api/holds/${item.reservationId}`;
+    const method = action === "confirm" ? "POST" : "DELETE";
 
     try {
         const response = await fetch(url, {method});
@@ -503,15 +568,16 @@ async function updateHold(url, method, successMessage) {
         if (!response.ok) {
             throw new Error(result.error || "予約情報を更新できませんでした。");
         }
-        message.textContent = successMessage;
-        reservationConfirmed = method === "POST";
-        currentHoldId = null;
-        document.getElementById("confirmButton").hidden = true;
-        document.getElementById("cancelButton").hidden = true;
+        item.status = action === "confirm" ? "confirmed" : "cancelled";
+        renderReservationResults();
+        document.getElementById("reservationMessage").textContent =
+            action === "confirm" ? `${item.childName}の予約を確定しました。` :
+            `${item.childName}の予約をキャンセルしました。`;
         renderCalendar();
     } catch (error) {
-        message.textContent = error.message || "予約情報を更新できませんでした。";
-        message.classList.add("error");
+        document.getElementById("reservationMessage").textContent =
+            error.message || "予約情報を更新できませんでした。";
+        document.getElementById("reservationMessage").classList.add("error");
     }
 }
 

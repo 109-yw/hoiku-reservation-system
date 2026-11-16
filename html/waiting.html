@@ -189,6 +189,10 @@ input, select {
     padding: 15px;
 }
 
+.waiting-result {
+    margin-top: 8px;
+}
+
 .back {
     display: block;
     text-align: center;
@@ -503,12 +507,11 @@ async function(e) {
     const selectedChildren = Array.from(
         document.querySelectorAll('input[name="childId"]:checked')
     );
-    if (selectedChildren.length !== 1) {
+    if (selectedChildren.length === 0) {
         document.getElementById("waitingMessage").textContent =
-            "お子様を1人選択してください。";
+            "申請するお子様を選択してください。";
         return;
     }
-    const childId = Number(selectedChildren[0].value);
 
     const time =
         document.getElementById("time");
@@ -517,9 +520,11 @@ async function(e) {
         time.options[time.selectedIndex].text.trim();
 
     const message =
-        "以下の内容でキャンセル待ちを申請しますか？\n\n" +
+        "以下のお子様をキャンセル待ちに申請しますか？\n\n" +
         "希望日：" + selectedDate + "\n" +
-        "児童ID：" + childId + "\n" +
+        "お子様：" + selectedChildren.map(child =>
+            child.parentElement.textContent.trim()
+        ).join("、") + "\n" +
         "利用時間：" + timeText;
 
     if (!confirm(message)) return;
@@ -527,29 +532,73 @@ async function(e) {
     const waitingMessage = document.getElementById("waitingMessage");
     waitingMessage.classList.remove("error");
     waitingMessage.textContent = "キャンセル待ちを登録しています。";
+    const submitButton = document.querySelector("#waitingForm button[type='submit']");
+    submitButton.disabled = true;
+    const results = [];
     try {
-        const response = await fetch("/api/holds", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({
-                child_id: childId,
-                care_date: selectedDate,
-                course: time.value
-            })
+        for (const checkbox of selectedChildren) {
+            const childName = checkbox.parentElement.textContent.trim();
+            try {
+                const response = await fetch("/api/holds", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        child_id: Number(checkbox.value),
+                        care_date: selectedDate,
+                        course: time.value
+                    })
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || "キャンセル待ちを登録できませんでした。");
+                }
+                if (result.status !== "waitlisted") {
+                    const cancelResponse = await fetch(
+                        `/api/holds/${result.reservation_id}`,
+                        {method: "DELETE"}
+                    );
+                    if (!cancelResponse.ok) {
+                        throw new Error(
+                            `${childName}は空き枠ができたため仮押さえされました。マイページから予約状況を確認してください。`
+                        );
+                    }
+                    results.push({
+                        childName,
+                        message: "空き枠ができたため仮押さえを取り消しました。通常予約画面からお申し込みください。",
+                        error: false,
+                        registered: false
+                    });
+                    continue;
+                }
+                results.push({
+                    childName,
+                    message: "キャンセル待ちを登録しました。",
+                    error: false,
+                    registered: true
+                });
+            } catch (error) {
+                results.push({
+                    childName,
+                    message: error.message || "キャンセル待ちを登録できませんでした。",
+                    error: true,
+                    registered: false
+                });
+            }
+        }
+        waitingMessage.replaceChildren();
+        const summary = document.createElement("p");
+        const registeredCount = results.filter(result => result.registered).length;
+        summary.textContent =
+            `キャンセル待ち登録結果：${registeredCount}/${results.length}人を登録しました。空きが出た場合は優先ポイント順にオファーをメールでお知らせします。`;
+        waitingMessage.appendChild(summary);
+        results.forEach(result => {
+            const detail = document.createElement("p");
+            detail.className = "waiting-result" + (result.error ? " error" : "");
+            detail.textContent = `${result.childName}：${result.message}`;
+            waitingMessage.appendChild(detail);
         });
-        const result = await response.json();
-        if (!response.ok) {
-            throw new Error(result.error || "キャンセル待ちを登録できませんでした。");
-        }
-        if (result.status !== "waitlisted") {
-            await fetch(`/api/holds/${result.reservation_id}`, {method: "DELETE"});
-            throw new Error("選択した時間帯に空きができています。通常の予約画面からお申し込みください。");
-        }
-        waitingMessage.textContent =
-            "キャンセル待ちを登録しました。空きが出た場合は、優先ポイント順にオファーをメールでお知らせします。";
-    } catch (error) {
-        waitingMessage.textContent = error.message || "キャンセル待ちを登録できませんでした。";
-        waitingMessage.classList.add("error");
+    } finally {
+        submitButton.disabled = false;
     }
 };
 
