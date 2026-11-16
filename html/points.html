@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>優先ポイント確認</title>
+<title>キャンセル待ち申請</title>
 
 <style>
 body {
@@ -21,68 +21,128 @@ header {
 }
 
 .container {
-    max-width: 600px;
+    max-width: 650px;
     margin: 30px auto;
-    padding: 20px;
-}
-
-.card {
-    background: white;
     padding: 25px;
-    margin-bottom: 20px;
+    background: white;
     border-radius: 12px;
-    box-shadow: 0 4px 12px #0001;
 }
 
-.point-card {
-    text-align: center;
-}
-
-.point-number {
-    font-size: 60px;
-    font-weight: bold;
-    color: #559ac2;
-    margin: 15px 0;
-}
-
-.point-number span {
-    font-size: 20px;
-}
-
-.description {
-    color: #777;
-    font-size: 14px;
-}
-
-.history {
+.month {
     display: flex;
     justify-content: space-between;
-    padding: 15px 0;
-    border-bottom: 1px solid #eee;
+    align-items: center;
+    margin-bottom: 20px;
 }
 
-.plus {
-    color: green;
+button {
+    cursor: pointer;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 15px;
+    background: #78b5d6;
+    color: white;
+}
+
+button:hover:not(:disabled) {
+    background: #559ac2;
+}
+
+.calendar {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 5px;
+}
+
+.weekday {
+    text-align: center;
     font-weight: bold;
+    padding: 10px 0;
+}
+
+.day {
+    min-height: 65px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background: white;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    transition: 0.2s;
+}
+
+.day:hover:not(:disabled) {
+    background: #dceefa;
+    transform: translateY(-3px) scale(1.04);
+    box-shadow: 0 4px 10px #0002;
+}
+
+.day.selected {
+    background: #c5e5f7;
+    border: 2px solid #559ac2;
+}
+
+.day:disabled {
+    background: #f1f1f1;
+    color: #aaa;
+    cursor: not-allowed;
+}
+
+.status {
+    font-size: 13px;
+}
+
+.open { color: green; }
+.few { color: orange; }
+.full { color: red; }
+.closed { color: #777; }
+
+.legend {
+    text-align: center;
+    margin: 20px 0;
+}
+
+.message {
+    min-height: 1.5em;
+    color: #333;
+}
+
+.message.error {
+    color: #b00020;
+}
+
+.form-area {
+    display: none;
+    border-top: 1px solid #ddd;
+    padding-top: 20px;
+}
+
+label {
+    display: block;
+    margin-top: 15px;
+}
+
+input, select {
+    width: 100%;
+    padding: 10px;
+    margin-top: 5px;
+    box-sizing: border-box;
+}
+
+.reserve {
+    width: 100%;
+    margin-top: 25px;
+    padding: 15px;
 }
 
 .back {
     display: block;
     text-align: center;
-    padding: 15px;
-    background: white;
+    margin-top: 25px;
     color: #559ac2;
-    border: 2px solid #78b5d6;
-    border-radius: 10px;
-    text-decoration: none;
-    font-weight: bold;
-    transition: 0.2s;
-}
-
-.back:hover {
-    background: #dceefa;
-    transform: translateY(-4px) scale(1.02);
-    box-shadow: 0 5px 12px #0002;
 }
 </style>
 </head>
@@ -91,63 +151,84 @@ header {
 
 <header>
     <h1>一時保育予約システム</h1>
-    <p>優先ポイント確認</p>
+    <p>キャンセル待ち申請画面</p>
 </header>
 
 <div class="container">
 
-    <!-- 現在のポイント -->
-    <div class="card point-card">
-        <h2>現在の優先ポイント</h2>
+    <h2>キャンセル待ち希望日を選択</h2>
 
-        <div class="point-number">
-            <span id="pointValue">3</span>
-            <span>ポイント</span>
-        </div>
+    <div class="month">
+        <button type="button" onclick="changeMonth(-1)">
+            ◀ 前月
+        </button>
 
-        <p class="description">
-            キャンセル待ちの優先順位に利用できます
-        </p>
+        <h2 id="monthTitle"></h2>
+
+        <button type="button" onclick="changeMonth(1)">
+            翌月 ▶
+        </button>
     </div>
 
-    <!-- ポイント履歴 -->
-    <div class="card">
-        <h2>ポイント履歴</h2>
+    <p id="calendarMessage"
+       class="message"
+       aria-live="polite"></p>
 
-        <div class="history">
-            <span>10/25 キャンセル待ち不成立</span>
-            <span class="plus">+1</span>
-        </div>
+    <div class="calendar" id="calendar"></div>
 
-        <div class="history">
-            <span>10/18 キャンセル待ち不成立</span>
-            <span class="plus">+1</span>
-        </div>
-
-        <div class="history">
-            <span>10/10 キャンセル待ち不成立</span>
-            <span class="plus">+1</span>
-        </div>
+    <div class="legend">
+        <span class="open">○ 空きあり</span>　
+        <span class="few">△ 残りわずか</span>　
+        <span class="full">× 満員</span>　
+        <span class="closed">休 開所情報なし・休所</span>
     </div>
 
-    <!-- ポイントの説明 -->
-    <div class="card">
-        <h2>優先ポイントについて</h2>
+    <p class="message">
+        ※満員（×）の日付のみキャンセル待ちを申請できます。
+    </p>
 
-        <p>
-            キャンセル待ちで予約が成立しなかった場合、
-            優先ポイントが加算されます。
-        </p>
+    <div class="form-area" id="formArea">
 
-        <p>
-            ポイントを使用して予約が成立すると、
-            保有ポイントは0にリセットされます。
-        </p>
+        <h2 id="selectedDate"></h2>
 
-        <p>
-            ポイントが多い利用者ほど、
-            キャンセル待ちで優先されます。
-        </p>
+        <p>児童IDと希望利用時間を選択してください。</p>
+
+        <form id="waitingForm">
+
+            <label for="childId">児童ID</label>
+            <input
+                id="childId"
+                type="text"
+                inputmode="numeric"
+                pattern="[0-9]+"
+                placeholder="児童IDを入力してください"
+                required
+            >
+
+            <label for="time">希望利用時間</label>
+            <select id="time" required>
+                <option value="">選択してください</option>
+                <option value="morning">
+                    9:00～13:00（午前）
+                </option>
+                <option value="afternoon">
+                    13:00～17:00（午後）
+                </option>
+                <option value="full_day">
+                    9:00～17:00（一日）
+                </option>
+            </select>
+
+            <button type="submit" class="reserve">
+                キャンセル待ちを申請
+            </button>
+
+        </form>
+
+        <p id="waitingMessage"
+           class="message"
+           aria-live="polite"></p>
+
     </div>
 
     <a href="hoiku.html" class="back">
@@ -155,6 +236,221 @@ header {
     </a>
 
 </div>
+
+<script>
+const today = new Date();
+today.setHours(0, 0, 0, 0);
+
+let currentYear = today.getFullYear();
+let currentMonth = today.getMonth();
+let selectedDate = null;
+let monthDays = new Map();
+let calendarRequestId = 0;
+
+// カレンダー表示
+async function renderCalendar() {
+    const requestId = ++calendarRequestId;
+    const year = currentYear;
+    const month = currentMonth;
+
+    const calendar = document.getElementById("calendar");
+    calendar.innerHTML = "";
+
+    document.getElementById("monthTitle").textContent =
+        `${year}年${month + 1}月`;
+
+    const calendarMessage =
+        document.getElementById("calendarMessage");
+
+    calendarMessage.textContent =
+        "空き状況を読み込んでいます。";
+
+    calendarMessage.classList.remove("error");
+
+    const weekdays =
+        ["日", "月", "火", "水", "木", "金", "土"];
+
+    weekdays.forEach(w => {
+        const div = document.createElement("div");
+        div.className = "weekday";
+        div.textContent = w;
+        calendar.appendChild(div);
+    });
+
+    const firstDay =
+        new Date(year, month, 1).getDay();
+
+    for (let i = 0; i < firstDay; i++) {
+        calendar.appendChild(
+            document.createElement("div")
+        );
+    }
+
+    let loaded = false;
+
+    try {
+        const response = await fetch(
+            `/api/availability/month?year=${year}&month=${month + 1}`
+        );
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                result.error || "空き状況を取得できませんでした。"
+            );
+        }
+
+        if (requestId !== calendarRequestId) return;
+
+        monthDays = new Map(
+            result.days.map(day => [day.care_date, day])
+        );
+
+        calendarMessage.textContent = "";
+        loaded = true;
+
+    } catch (error) {
+        if (requestId !== calendarRequestId) return;
+
+        monthDays = new Map();
+
+        calendarMessage.textContent =
+            error.message || "空き状況を取得できませんでした。";
+
+        calendarMessage.classList.add("error");
+    }
+
+    const lastDay =
+        new Date(year, month + 1, 0).getDate();
+
+    for (let day = 1; day <= lastDay; day++) {
+        const date = new Date(year, month, day);
+
+        const dateKey = [
+            year,
+            String(month + 1).padStart(2, "0"),
+            String(day).padStart(2, "0")
+        ].join("-");
+
+        const dayInfo = monthDays.get(dateKey);
+
+        const status =
+            dayInfo ? dayInfo.status : "closed";
+
+        const btn = document.createElement("button");
+        btn.className = "day";
+        btn.type = "button";
+
+        const number = document.createElement("span");
+        number.textContent = day;
+
+        const mark = document.createElement("span");
+        mark.className = "status " + status;
+
+        mark.textContent =
+            status === "full" ? "×" :
+            status === "few" ? "△" :
+            status === "open" ? "○" : "休";
+
+        btn.appendChild(number);
+        btn.appendChild(mark);
+
+        // 満員の日付だけ選択可能
+        if (
+            date < today ||
+            !loaded ||
+            !dayInfo ||
+            status !== "full"
+        ) {
+            btn.disabled = true;
+        } else {
+            btn.onclick = () => selectDate(dateKey, btn);
+        }
+
+        calendar.appendChild(btn);
+    }
+}
+
+// 月の切り替え
+function changeMonth(value) {
+    const date =
+        new Date(currentYear, currentMonth + value, 1);
+
+    currentYear = date.getFullYear();
+    currentMonth = date.getMonth();
+
+    selectedDate = null;
+
+    document.getElementById("formArea").style.display =
+        "none";
+
+    document.getElementById("waitingForm").reset();
+
+    document.getElementById("waitingMessage").textContent =
+        "";
+
+    renderCalendar();
+}
+
+// 日付選択
+function selectDate(dateKey, button) {
+    document.querySelectorAll(".day").forEach(btn => {
+        btn.classList.remove("selected");
+    });
+
+    button.classList.add("selected");
+    selectedDate = dateKey;
+
+    document.getElementById("waitingForm").reset();
+
+    document.getElementById("waitingMessage").textContent =
+        "";
+
+    document.getElementById("selectedDate").textContent =
+        new Date(`${dateKey}T00:00:00`)
+            .toLocaleDateString("ja-JP") +
+        " のキャンセル待ち申請";
+
+    document.getElementById("formArea").style.display =
+        "block";
+}
+
+// 申請内容の確認
+document.getElementById("waitingForm").onsubmit =
+function(e) {
+    e.preventDefault();
+
+    if (!selectedDate) return;
+
+    const childId =
+        document.getElementById("childId").value;
+
+    const time =
+        document.getElementById("time");
+
+    const timeText =
+        time.options[time.selectedIndex].text.trim();
+
+    const message =
+        "以下の内容でキャンセル待ちを申請しますか？\n\n" +
+        "希望日：" + selectedDate + "\n" +
+        "児童ID：" + childId + "\n" +
+        "利用時間：" + timeText;
+
+    if (confirm(message)) {
+        const waitingMessage =
+            document.getElementById("waitingMessage");
+
+        waitingMessage.textContent =
+            "申請内容を確認しました。" +
+            "現在は画面確認用のため、" +
+            "申請データはまだ保存されていません。";
+    }
+};
+
+renderCalendar();
+</script>
 
 </body>
 </html>
