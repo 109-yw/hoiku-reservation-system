@@ -189,11 +189,13 @@ input, select {
             <span class="full">× 満員</span>　
             <span class="closed">休み</span>
         </div>
+        <p>△は日全体の目安です。時間帯によっては満員の場合があります。</p>
 
     
 <div class="form-area" id="formArea">
 
         <h2 id="selectedDate"></h2>
+        <p id="slotAvailability" class="message" aria-live="polite"></p>
         <p>お子様と利用時間を選択してください。</p>
 
         <form id="reservationForm">
@@ -236,7 +238,9 @@ let selectedDate = null;
 let reservationsInProgress = false;
 let reservationResults = [];
 let monthDays = new Map();
+let selectedDaySlots = [];
 let calendarRequestId = 0;
+let slotAvailabilityRequestId = 0;
 
 // カレンダーを表示
 async function renderCalendar() {
@@ -332,10 +336,13 @@ function changeMonth(value) {
     currentMonth = date.getMonth();
 
     selectedDate = null;
+    selectedDaySlots = [];
+    slotAvailabilityRequestId++;
     document.getElementById("formArea").style.display = "none";
     document.getElementById("reservationForm").reset();
     document.getElementById("reservationMessage").textContent = "";
     document.getElementById("reservationResults").replaceChildren();
+    document.getElementById("slotAvailability").textContent = "";
     reservationResults = [];
 
     renderCalendar();
@@ -353,11 +360,75 @@ function selectDate(dateKey, button) {
     document.getElementById("reservationMessage").textContent = "";
     document.getElementById("reservationResults").replaceChildren();
     reservationResults = [];
+    selectedDaySlots = [];
+    const slotAvailability = document.getElementById("slotAvailability");
+    slotAvailability.textContent = "時間帯ごとの空き状況を確認しています。";
+    slotAvailability.classList.remove("error");
 
     document.getElementById("selectedDate").textContent =
         new Date(`${dateKey}T00:00:00`).toLocaleDateString("ja-JP") + " の予約";
 
     document.getElementById("formArea").style.display = "block";
+    loadDateAvailability(dateKey);
+}
+
+async function loadDateAvailability(dateKey) {
+    const requestId = ++slotAvailabilityRequestId;
+    const message = document.getElementById("slotAvailability");
+    try {
+        const response = await fetch(
+            `/api/availability?care_date=${encodeURIComponent(dateKey)}`
+        );
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || "時間帯ごとの空き状況を取得できませんでした。");
+        }
+        if (requestId !== slotAvailabilityRequestId || selectedDate !== dateKey) {
+            return;
+        }
+        selectedDaySlots = result.slots;
+        updateSlotAvailability();
+    } catch (error) {
+        if (requestId !== slotAvailabilityRequestId || selectedDate !== dateKey) {
+            return;
+        }
+        selectedDaySlots = [];
+        message.textContent =
+            error.message || "時間帯ごとの空き状況を取得できませんでした。";
+        message.classList.add("error");
+    }
+}
+
+function updateSlotAvailability() {
+    const message = document.getElementById("slotAvailability");
+    const selectedCourse = document.getElementById("time").value;
+    if (!selectedCourse || selectedDaySlots.length === 0) {
+        message.textContent = selectedDaySlots.length === 0
+            ? "時間帯ごとの空き状況を確認しています。"
+            : "利用時間を選択すると、時間帯ごとの定員状況を表示します。";
+        message.classList.remove("error");
+        return;
+    }
+
+    const courseHours = {
+        morning: [9, 13],
+        afternoon: [13, 17],
+        full_day: [9, 17]
+    };
+    const [startHour, endHour] = courseHours[selectedCourse];
+    const slots = selectedDaySlots.filter(
+        slot => slot.hour >= startHour && slot.hour < endHour
+    );
+    const fullHours = slots
+        .filter(slot => slot.children_remaining <= 0)
+        .map(slot => `${slot.hour}:00`);
+    const minimumRemaining = Math.min(
+        ...slots.map(slot => slot.children_remaining)
+    );
+    message.classList.remove("error");
+    message.textContent = fullHours.length
+        ? `選択した時間帯には満員の時間（${fullHours.join("、")}）があります。申込時にキャンセル待ちとなる場合があります。`
+        : `選択時間帯の定員上の残りは最低${minimumRemaining}人です。保育士配置を含む最終判定は申込時に行われます。`;
 }
 
 async function loadChildren() {
@@ -389,6 +460,11 @@ async function loadChildren() {
         message.classList.add("error");
     }
 }
+
+document.getElementById("time").addEventListener(
+    "change",
+    updateSlotAvailability
+);
 
 document.getElementById("reservationForm").onsubmit = async function(e) {
     e.preventDefault();

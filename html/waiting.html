@@ -188,7 +188,7 @@ input, select {
     </div>
 
     <p class="message">
-        ※満員（×）の日付のみキャンセル待ちを申請できます。
+        ※満員（×）または残りわずか（△）の日付を選択できます。申請した時間帯に空きがある場合は通常予約画面をご案内します。
     </p>
 
     <div class="form-area" id="formArea">
@@ -355,12 +355,12 @@ async function renderCalendar() {
         btn.appendChild(number);
         btn.appendChild(mark);
 
-        // 満員の日付だけ選択可能
+        // Full or nearly full days can contain a full requested time slot.
         if (
             date < today ||
             !loaded ||
             !dayInfo ||
-            status !== "full"
+            !["full", "few"].includes(status)
         ) {
             btn.disabled = true;
         } else {
@@ -539,6 +539,10 @@ async function(e) {
         summary.textContent =
             `キャンセル待ち登録結果：${registeredCount}/${results.length}人を登録しました。空きが出た場合は優先ポイント順にオファーをメールでお知らせします。`;
         waitingMessage.appendChild(summary);
+        const offerNote = document.createElement("p");
+        offerNote.textContent =
+            "オファーは、申請した日付と利用時間帯にキャンセルが出た場合にマイページへ表示されます。";
+        waitingMessage.appendChild(offerNote);
         results.forEach(result => {
             const detail = document.createElement("p");
             detail.className = "waiting-result" + (result.error ? " error" : "");

@@ -50,6 +50,14 @@ class ReservationApiTests(unittest.TestCase):
         response = self.client.get("/html/reservation.html")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"/api/availability/month", response.data)
+        self.assertIn(b"/api/availability?care_date=", response.data)
+        response.close()
+
+    def test_waiting_page_allows_nearly_full_days(self) -> None:
+        response = self.client.get("/html/waiting.html")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'["full", "few"].includes(status)', response.data)
         response.close()
 
     def test_monthly_availability_contains_operating_days(self) -> None:
@@ -395,8 +403,12 @@ class ReservationApiTests(unittest.TestCase):
 
         with self.client.session_transaction() as browser_session:
             browser_session["guardian_id"] = source_guardian_id
-        cancelled = self.client.delete(f"/api/holds/{source.json['reservation_id']}")
-        self.assertEqual(cancelled.status_code, 200)
+        cancelled = self.client.post(
+            "/cancel",
+            data={"reservation_id": source.json["reservation_id"]},
+        )
+        self.assertEqual(cancelled.status_code, 302)
+        self.assertEqual(cancelled.headers["Location"], "/mypage")
 
         with closing(sqlite3.connect(self.app.config["DATABASE"])) as connection:
             offer = connection.execute(
@@ -436,6 +448,10 @@ class ReservationApiTests(unittest.TestCase):
             browser_session["guardian_id"] = high_guardian_id
         mypage = self.client.get("/mypage")
         self.assertIn("キャンセル待ちオファー".encode(), mypage.data)
+        self.assertIn(
+            f"respondToOffer({offer[0]},".encode(),
+            mypage.data,
+        )
         accepted = self.client.post(f"/api/waitlist/offers/{offer[0]}/accept")
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(accepted.json["priority_points"], 0)
