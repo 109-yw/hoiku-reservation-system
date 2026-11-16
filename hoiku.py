@@ -801,42 +801,55 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     200,
                 )
 
-            timeout_row = connection.execute(
-                "SELECT value FROM settings WHERE key = 'hold_timeout_sec'"
+                        # Python側の書き込みロックを解除してから、Cに新規予約を任せる。
+            connection.rollback()
+
+            try:
+                result = subprocess.run(
+                    [
+                        str(ROOT / "hoiku_cli.exe"),
+                        str(Path(app.config["DATABASE"]).resolve()),
+                        str(child_id),
+                        care_date,
+                        str(start_hour),
+                        str(end_hour),
+                        str(time.time_ns() // 1_000_000),
+                    ],
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError:
+                app.logger.exception("hoiku_cli.exe の起動に失敗しました")
+                return error_response("予約プログラムを起動できませんでした。", 500)
+
+            if result.returncode != 0:
+                app.logger.error("Cの予約処理に失敗しました: %s", result.stderr.strip())
+                return error_response("予約枠を確保できませんでした。", 409)
+
+            status, reservation_id_text = result.stdout.strip().split()
+            reservation_id = int(reservation_id_text)
+
+            reservation = connection.execute(
+                """
+                SELECT hold_expires_at, fee_yen
+                FROM reservations
+                WHERE reservation_id = ?
+                """,
+                (reservation_id,),
             ).fetchone()
-            if timeout_row is None:
-                raise RuntimeError("hold_timeout_sec is missing from settings")
-            hold_expires_at = (
-                datetime.now() + timedelta(seconds=int(timeout_row["value"]))
-            ).strftime("%Y-%m-%d %H:%M:%S")
-            cursor = connection.execute(
-                """
-                INSERT INTO reservations (
-                    child_id, care_date, start_hour, end_hour, age_class_id,
-                    staff_cost, fee_yen, status, hold_expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?)
-                """,
-                (
-                    child_id,
-                    care_date,
-                    start_hour,
-                    end_hour,
-                    age_class["age_class_id"],
-                    age_class["staff_cost"],
-                    fee_yen,
-                    hold_expires_at,
+
+            return (
+                jsonify(
+                    reservation_id=reservation_id,
+                    status=status,
+                    course=course,
+                    start_hour=start_hour,
+                    end_hour=end_hour,
+                    hold_expires_at=reservation["hold_expires_at"],
+                    fee_yen=reservation["fee_yen"],
                 ),
-            )
-            reservation_id = cursor.lastrowid
-            connection.executemany(
-                """
-                INSERT INTO reservation_hours (reservation_id, care_date, hour)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    (reservation_id, care_date, hour)
-                    for hour in range(start_hour, end_hour)
-                ),
+                201,
             )
             connection.commit()
         except ApiError as error:
