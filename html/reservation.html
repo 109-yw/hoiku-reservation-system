@@ -132,6 +132,23 @@ input, select {
     box-sizing: border-box;
 }
 
+/* お子様のチェックボックス */
+#childrenList label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    cursor: pointer;
+}
+
+#childrenList input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    padding: 0;
+    flex-shrink: 0;
+}
+
 .reserve {
     width: 100%;
     margin-top: 25px;
@@ -187,7 +204,7 @@ input, select {
             <span class="open">○ 空きあり</span>　
             <span class="few">△ 残りわずか</span>　
             <span class="full">× 満員</span>　
-            <span class="closed">休み</span>
+            <span class="closed">休 休み</span>
         </div>
         <p>△は日全体の目安です。時間帯によっては満員の場合があります。</p>
 
