@@ -1095,11 +1095,17 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             # Python側の書き込みロックを解除してから、Cに新規予約を任せる。
             connection.rollback()
 
+            database_path = Path(app.config["DATABASE"]).resolve()
+            try:
+                cli_database_path = str(database_path.relative_to(ROOT))
+            except ValueError:
+                cli_database_path = str(database_path)
+
             try:
                 result = subprocess.run(
                     [
                         str(ROOT / "hoiku_cli.exe"),
-                        str(Path(app.config["DATABASE"]).resolve()),
+                        cli_database_path,
                         str(child_id),
                         care_date,
                         str(start_hour),
@@ -1109,6 +1115,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     capture_output=True,
                     encoding="utf-8",
                     errors="replace",
+                    cwd=ROOT,
                 )
             except OSError:
                 app.logger.exception("hoiku_cli.exe の起動に失敗しました")
